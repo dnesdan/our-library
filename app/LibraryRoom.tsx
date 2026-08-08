@@ -1,7 +1,7 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { ContactShadows, Float, RoundedBox, Sparkles, useGLTF, useTexture } from "@react-three/drei";
+import { ContactShadows, Environment, Float, Lightformer, RoundedBox, Sparkles, useGLTF, useTexture } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Book, Profile } from "./data";
@@ -13,10 +13,25 @@ type Props = {
   search: string;
   profile: Profile;
   onSelect: (id: number) => void;
+  onClear: () => void;
 };
+
+type CameraMotion = {
+  yaw: number;
+  pitch: number;
+  dolly: number;
+  velocityYaw: number;
+  velocityPitch: number;
+  dragging: boolean;
+  suppressClickUntil: number;
+  reduced: boolean;
+};
+
+type LadderMotion = { x: number; velocity: number; arrived: boolean; targetX: number };
 
 const bays = [-5.25, -1.75, 1.75, 5.25];
 const rows = [-0.42, 1.08, 2.58, 4.08];
+const fillerPalette = ["#6e2f2b", "#344d4c", "#9b7040", "#253847", "#765447", "#4c3a55", "#b69a6a", "#863e32"];
 
 type PBRSet = { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture };
 
@@ -75,6 +90,32 @@ function positionFor(index: number) {
   return { x: bays[bay] - .66 + slot * .62, y: rows[row], z: .92, bay, row };
 }
 
+function ladderTargetFor(position: ReturnType<typeof positionFor>) {
+  return THREE.MathUtils.clamp(position.x - .78, -6.42, 6.42);
+}
+
+export function createRoomPlacements(collection: Book[]) {
+  const slots = collection.map((_, index) => index);
+  const bayPriority = [2, 1, 3, 0];
+  const upper = slots.filter(index => positionFor(index).row >= 2).sort((a,b) => {
+    const pa = positionFor(a), pb = positionFor(b);
+    return pb.row - pa.row || Math.floor(a / 16) - Math.floor(b / 16) || bayPriority.indexOf(pa.bay) - bayPriority.indexOf(pb.bay);
+  });
+  const lower = slots.filter(index => positionFor(index).row < 2);
+  const highBooks = collection.filter(book => book.highShelf);
+  const regularBooks = collection.filter(book => !book.highShelf);
+  const placements = new Map<number, number>();
+  const used = new Set<number>();
+  highBooks.forEach(book => {
+    const slot = [...upper, ...lower].find(index => !used.has(index));
+    if (slot === undefined) return;
+    placements.set(book.id, slot); used.add(slot);
+  });
+  const remaining = [...lower, ...upper].filter(index => !used.has(index));
+  regularBooks.forEach((book, index) => { if (remaining[index] !== undefined) placements.set(book.id, remaining[index]); });
+  return placements;
+}
+
 function useSpineTexture(book: Book) {
   return useMemo(() => {
     if (typeof document === "undefined") return null;
@@ -131,39 +172,94 @@ function useSpineTexture(book: Book) {
   }, [book]);
 }
 
-function CameraRig({ selectedId, focus }: { selectedId: number | null; focus: "shelves" | "corner" }) {
+function CameraRig({ selectedIndex, focus, motion, ladder }: { selectedIndex: number | null; focus: "shelves" | "corner"; motion: React.RefObject<CameraMotion>; ladder: React.RefObject<LadderMotion> }) {
   const { camera, pointer, size } = useThree();
+  const vectors = useMemo(() => ({ target: new THREE.Vector3(), look: new THREE.Vector3(), current: new THREE.Vector3(), aim: new THREE.Vector3() }), []);
   useFrame((_, dt) => {
-    const index = selectedId ? selectedId - 1 : -1;
-    const p = index >= 0 ? positionFor(index) : null;
+    const controls = motion.current;
+    if (!controls) return;
+    if (!controls.dragging && !controls.reduced) {
+      controls.yaw = THREE.MathUtils.clamp(controls.yaw + controls.velocityYaw * dt * 12, -1.2, 1.2);
+      controls.pitch = THREE.MathUtils.clamp(controls.pitch + controls.velocityPitch * dt * 12, -.52, .58);
+      const friction = Math.exp(-dt * 8.5);
+      controls.velocityYaw *= friction;
+      controls.velocityPitch *= friction;
+    }
+    const p = selectedIndex !== null ? positionFor(selectedIndex) : null;
+    const waitingForLadder = Boolean(p && p.row >= 2 && (!ladder.current?.arrived || Math.abs((ladder.current?.x ?? -99) - ladderTargetFor(p)) > .08));
     const mobile = size.width < 700;
     const mobileX = focus === "corner" ? 4.45 : -3.55;
-    const target = p ? new THREE.Vector3(p.x * .42, Math.max(2.05, p.y), 9.35) : new THREE.Vector3((mobile ? mobileX : 1.8) + pointer.x * .34, 2.95 + pointer.y * .12, mobile ? 14.7 : 14.15);
+    const parallax = controls.dragging || controls.reduced ? 0 : 1;
+    const target = p
+      ? vectors.target.set(p.x * .42 + controls.yaw * .72, Math.max(2.05, p.y) + controls.pitch * .48, (waitingForLadder ? 11.45 : 9.35) + controls.dolly * .3)
+      : vectors.target.set((mobile ? mobileX : 1.8) + controls.yaw * (mobile ? 2.15 : 3.15) + pointer.x * .34 * parallax, 2.95 + controls.pitch * 1.45 + pointer.y * .12 * parallax, (mobile ? 14.7 : 14.15) + controls.dolly);
     camera.position.lerp(target, 1 - Math.exp(-dt * 2.6));
-    const look = p ? new THREE.Vector3(p.x, p.y, .4) : new THREE.Vector3(mobile ? (focus === "corner" ? 4.35 : -3.55) : -.45, 2.3, .2);
-    const current = new THREE.Vector3();
+    const look = p
+      ? vectors.look.set(p.x + controls.yaw * .28, p.y + controls.pitch * .2, .4)
+      : vectors.look.set((mobile ? (focus === "corner" ? 4.35 : -3.55) : -.45) + controls.yaw * .75, 2.3 + controls.pitch * .52, .2);
+    const { current, aim } = vectors;
     camera.getWorldDirection(current);
-    const aim = look.clone().sub(camera.position).normalize();
+    aim.copy(look).sub(camera.position).normalize();
     current.lerp(aim, 1 - Math.exp(-dt * 2.9));
-    camera.lookAt(camera.position.clone().add(current));
+    look.copy(camera.position).add(current);
+    camera.lookAt(look);
   });
   return null;
 }
 
-function FilmicTone({ dark }: { dark: boolean }) {
-  const { gl } = useThree();
+function AtmosphereRig({ dark, searching, compact }: { dark: boolean; searching: boolean; compact: boolean }) {
+  const ambient = useRef<THREE.AmbientLight>(null);
+  const hemisphere = useRef<THREE.HemisphereLight>(null);
+  const directional = useRef<THREE.DirectionalLight>(null);
+  const searchLight = useRef<THREE.SpotLight>(null);
+  const ceiling = useRef<THREE.PointLight>(null);
+  const fill = useRef<THREE.RectAreaLight>(null);
+  const searchTarget = useMemo(() => new THREE.Object3D(), []);
+  const { gl, scene } = useThree();
+  const palette = useMemo(() => ({
+    background: new THREE.Color(dark ? "#120e0c" : "#b8aa91"),
+    ambient: new THREE.Color(dark ? "#aa8068" : "#ffe9c9"),
+    sky: new THREE.Color(dark ? "#647694" : "#d9edf1"),
+    ground: new THREE.Color(dark ? "#6a3723" : "#8d5c3c"),
+    sun: new THREE.Color(dark ? "#8f9db8" : "#fff0cf"),
+    fill: new THREE.Color(dark ? "#d3a078" : "#ffe4bd"),
+  }), [dark]);
   useEffect(() => {
     gl.toneMapping = THREE.ACESFilmicToneMapping;
-    gl.toneMappingExposure = dark ? 1.32 : 1.08;
     gl.outputColorSpace = THREE.SRGBColorSpace;
-  }, [dark, gl]);
-  return null;
+    if (!(scene.background instanceof THREE.Color)) scene.background = palette.background.clone();
+    if (!(scene.fog instanceof THREE.Fog)) scene.fog = new THREE.Fog(palette.background.clone(), 18, 30);
+  }, [gl, palette.background, scene]);
+  useFrame((_, dt) => {
+    const speed = 1 - Math.exp(-dt * 2.8);
+    if (scene.background instanceof THREE.Color) scene.background.lerp(palette.background, speed);
+    if (scene.fog instanceof THREE.Fog) {
+      scene.fog.color.lerp(palette.background, speed);
+      scene.fog.near = THREE.MathUtils.damp(scene.fog.near, 18, 3, dt);
+      scene.fog.far = THREE.MathUtils.damp(scene.fog.far, 30, 3, dt);
+    }
+    if (ambient.current) { ambient.current.intensity = THREE.MathUtils.damp(ambient.current.intensity, dark ? .68 : .85, 3, dt); ambient.current.color.lerp(palette.ambient, speed); }
+    if (hemisphere.current) { hemisphere.current.intensity = THREE.MathUtils.damp(hemisphere.current.intensity, dark ? .5 : .75, 3, dt); hemisphere.current.color.lerp(palette.sky, speed); hemisphere.current.groundColor.lerp(palette.ground, speed); }
+    if (directional.current) { directional.current.intensity = THREE.MathUtils.damp(directional.current.intensity, dark ? .9 : 2.25, 3, dt); directional.current.color.lerp(palette.sun, speed); }
+    if (searchLight.current) searchLight.current.intensity = THREE.MathUtils.damp(searchLight.current.intensity, searching ? 1.5 : .55, 4, dt);
+    if (ceiling.current) ceiling.current.intensity = THREE.MathUtils.damp(ceiling.current.intensity, dark ? .65 : .3, 3, dt);
+    if (fill.current) { fill.current.intensity = THREE.MathUtils.damp(fill.current.intensity, dark ? .62 : .82, 3, dt); fill.current.color.lerp(palette.fill, speed); }
+    gl.toneMappingExposure = THREE.MathUtils.damp(gl.toneMappingExposure, dark ? 1.32 : 1.08, 2.7, dt);
+  });
+  return <>
+    <ambientLight ref={ambient} intensity={dark ? .68 : .85} color={palette.ambient} />
+    <hemisphereLight ref={hemisphere} intensity={dark ? .5 : .75} color={palette.sky} groundColor={palette.ground} />
+    <directionalLight ref={directional} position={[7, 8, 7]} intensity={dark ? .9 : 2.25} color={palette.sun} castShadow shadow-mapSize={[compact ? 1024 : 2048, compact ? 1024 : 2048]} shadow-bias={-.0005} shadow-normalBias={.025} shadow-camera-left={-10} shadow-camera-right={10} shadow-camera-top={9} shadow-camera-bottom={-7} shadow-camera-near={.5} shadow-camera-far={28} />
+    <spotLight ref={searchLight} target={searchTarget} position={[0, 7, 4]} angle={.62} penumbra={.85} intensity={searching ? 1.5 : .55} color="#e9bd79" castShadow={false} />
+    <primitive object={searchTarget} />
+    <pointLight ref={ceiling} position={[0,5.4,2.5]} intensity={dark ? .65 : .3} color="#e3bd7b" distance={9} decay={2} />
+    <rectAreaLight ref={fill} position={[0,3.8,5.2]} rotation={[0,Math.PI,0]} width={14} height={4.5} intensity={dark ? .62 : .82} color={palette.fill} />
+  </>;
 }
 
 function ShelfBay({ x }: { x: number }) {
   const wood = usePBRSet("dark-wood", [1.1, 2.5]);
   const baySeed = Math.round((x + 6) * 10);
-  const palette = ["#6e2f2b", "#344d4c", "#9b7040", "#253847", "#765447", "#4c3a55", "#b69a6a", "#863e32"];
   return <group position={[x, 0, 0]}>
     <RoundedBox args={[3.2, 6.4, .62]} radius={.08} smoothness={3} position={[0, 2.4, .25]} castShadow receiveShadow>
       <meshStandardMaterial {...wood} color="#5a3524" roughness={.7} normalScale={new THREE.Vector2(.28,.28)} />
@@ -185,21 +281,22 @@ function ShelfBay({ x }: { x: number }) {
       <mesh position={[0,2.86,0]} rotation={[0,0,Math.PI]} castShadow><cylinderGeometry args={[.23,.16,.28,6]} /><meshStandardMaterial {...wood} color="#68412b" roughness={.6} /></mesh>
     </group>)}
     {rows.map((y, row) => Array.from({ length: 11 }, (_, slot) => {
+      const slotX = -1.22 + slot * .245;
+      if ([-.66,-.04,.58].some(interactiveX => Math.abs(slotX - interactiveX) < .14)) return null;
       if ((slot * 7 + row * 11 + baySeed) % 17 === 0 || (slot === 9 && (row + baySeed) % 3 === 0)) return null;
       const height = .78 + ((slot * 7 + row * 3) % 5) * .075;
       const width = .18 + ((slot * 5 + row) % 3) * .035;
       const lean = (slot + row + baySeed) % 9 === 0 ? -.075 : (slot * 2 + row + baySeed) % 13 === 0 ? .06 : 0;
-      return <group key={`${row}-${slot}`} position={[-1.22 + slot * .245, y + height / 2, .94 + ((slot+baySeed)%4)*.008]} rotation={[0, ((slot+row)%5-2)*.006, lean]}>
-        <RoundedBox args={[width, height, .42]} radius={.015} smoothness={2} castShadow><meshStandardMaterial color={palette[(slot + row * 2) % palette.length]} roughness={.6} /></RoundedBox>
+      return <group key={`${row}-${slot}`} position={[slotX, y + height / 2, .94 + ((slot+baySeed)%4)*.008]} rotation={[0, ((slot+row)%5-2)*.006, lean]}>
+        <RoundedBox args={[width, height, .42]} radius={.015} smoothness={2} castShadow><meshStandardMaterial color={fillerPalette[(slot + row * 2) % fillerPalette.length]} roughness={.6} /></RoundedBox>
         <mesh position={[width*.51,0,0]}><boxGeometry args={[.012,height*.88,.36]} /><meshStandardMaterial color="#d4c5aa" roughness={.96} /></mesh>
-        {Array.from({length:4},(_,page)=><mesh key={page} position={[width*.519,-height*.3+page*height*.19,.015]}><boxGeometry args={[.004,.006,.33]} /><meshBasicMaterial color="#8f8068" transparent opacity={.45} /></mesh>)}
         {(slot + row) % 3 === 0 && <mesh position={[0, height * .22, .216]}><boxGeometry args={[width * .72, .018, .008]} /><meshBasicMaterial color="#c7a56c" /></mesh>}
         {(slot + row) % 4 === 0 && <mesh position={[0, -height * .2, .216]}><boxGeometry args={[width * .72, .012, .008]} /><meshBasicMaterial color="#d0b986" /></mesh>}
       </group>;
     }))}
-    {rows.map((y,row)=>(row+baySeed)%3===0 && <group key={`stack-${row}`} position={[.76,y+.055,1.02]} rotation={[0,.025,0]}>
-      {[0,.085,.165].map((sy,i)=><RoundedBox key={sy} args={[.72-i*.08,.07,.46]} radius={.012} smoothness={2} position={[0,sy,0]} rotation={[0,(i-1)*.035,(i-1)*.018]} castShadow>
-        <meshStandardMaterial color={palette[(row*3+i+baySeed)%palette.length]} roughness={.68} />
+    {rows.map((y,row)=>(row+baySeed)%3===0 && <group key={`stack-${row}`} position={[1.08,y+.055,1.02]} rotation={[0,.025,0]}>
+      {[0,.085,.165].map((sy,i)=><RoundedBox key={sy} args={[.5-i*.05,.07,.46]} radius={.012} smoothness={2} position={[0,sy,0]} rotation={[0,(i-1)*.035,(i-1)*.018]} castShadow>
+        <meshStandardMaterial color={fillerPalette[(row*3+i+baySeed)%fillerPalette.length]} roughness={.68} />
       </RoundedBox>)}
     </group>)}
     <mesh position={[0, 5.62, .83]} castShadow><boxGeometry args={[3.48, .22, .9]} /><meshStandardMaterial {...wood} color="#815033" roughness={.58} /></mesh>
@@ -225,21 +322,28 @@ function ShelfBay({ x }: { x: number }) {
   </group>;
 }
 
-function RoomBook({ book, index, selected, match, profile, onSelect }: { book: Book; index: number; selected: boolean; match: boolean; profile: Profile; onSelect: () => void }) {
+function RoomBook({ book, index, selected, match, profile, ladder, interaction, reduced, onSelect }: { book: Book; index: number; selected: boolean; match: boolean; profile: Profile; ladder: React.RefObject<LadderMotion>; interaction: React.RefObject<CameraMotion>; reduced: boolean; onSelect: () => void }) {
   const ref = useRef<THREE.Group>(null);
+  const [hovered, setHovered] = useState(false);
   const spine = useSpineTexture(book);
   const p = positionFor(index);
   const height = .92 + (index % 5) * .07;
-  const width = .34 + (index % 3) * .07;
+  const width = .18 + (index % 4) * .025;
   const restingTilt = index % 11 === 0 ? -.055 : index % 13 === 0 ? .045 : 0;
   useFrame((_, dt) => {
     if (!ref.current) return;
-    const tz = selected ? 1.45 : match ? 1.12 : .96;
-    ref.current.position.z = THREE.MathUtils.damp(ref.current.position.z, tz, 6, dt);
-    ref.current.rotation.y = THREE.MathUtils.damp(ref.current.rotation.y, selected ? -.11 : 0, 7, dt);
-    ref.current.rotation.z = THREE.MathUtils.damp(ref.current.rotation.z, selected ? 0 : restingTilt, 8, dt);
+    const canRetrieve = p.row < 2 || Boolean(ladder.current?.arrived && Math.abs((ladder.current?.x ?? -99) - ladderTargetFor(p)) < .08);
+    const retrieved = selected && canRetrieve;
+    const tz = retrieved ? 2.12 : selected || match ? 1.16 : hovered && !reduced ? 1.04 : .96;
+    const speed = reduced ? 22 : 6;
+    ref.current.position.z = THREE.MathUtils.damp(ref.current.position.z, tz, speed, dt);
+    ref.current.position.y = THREE.MathUtils.damp(ref.current.position.y, p.y + height / 2 + (retrieved && !reduced ? .12 : 0), reduced ? 22 : 7, dt);
+    ref.current.rotation.y = THREE.MathUtils.damp(ref.current.rotation.y, retrieved && !reduced ? -.26 : 0, reduced ? 22 : 7, dt);
+    ref.current.rotation.z = THREE.MathUtils.damp(ref.current.rotation.z, retrieved && !reduced ? -.035 : restingTilt, reduced ? 22 : 8, dt);
+    const scale = THREE.MathUtils.damp(ref.current.scale.x, retrieved && !reduced ? 1.06 : 1, reduced ? 22 : 7, dt);
+    ref.current.scale.setScalar(scale);
   });
-  return <group ref={ref} position={[p.x, p.y + height / 2, .96]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+  return <group ref={ref} position={[p.x, p.y + height / 2, .96]} onClick={(e) => { e.stopPropagation(); if (Date.now() >= (interaction.current?.suppressClickUntil || 0)) onSelect(); }}>
     <RoundedBox args={[width, height, .55]} radius={.022} smoothness={3} castShadow>
       <meshStandardMaterial color={book.color} roughness={.62} metalness={.025} emissive={match || selected ? book.accent : "#000000"} emissiveIntensity={match ? .28 : selected ? .14 : 0} />
     </RoundedBox>
@@ -247,7 +351,6 @@ function RoomBook({ book, index, selected, match, profile, onSelect }: { book: B
       <meshStandardMaterial color={book.color} roughness={.62} metalness={.02} emissive={match || selected ? book.accent : "#000000"} emissiveIntensity={match ? .28 : selected ? .14 : 0} />
     </RoundedBox>)}
     <mesh position={[width * .46,0,.015]}><boxGeometry args={[.018,height*.84,.43]} /><meshStandardMaterial color="#d8cdb6" roughness={.96} /></mesh>
-    {Array.from({length:7},(_,page)=><mesh key={page} position={[width*.472,-height*.35+page*height*.115,.01]}><boxGeometry args={[.006,.004,.4]} /><meshBasicMaterial color="#8f8068" transparent opacity={.42} /></mesh>)}
     <RoundedBox args={[width*.92,height*.9,.018]} radius={.015} smoothness={2} position={[0,0,.286]}><meshStandardMaterial map={spine || undefined} color={spine ? "#ffffff" : book.color} roughness={.58} /></RoundedBox>
     <mesh position={[0,height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
     <mesh position={[0,-height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
@@ -256,46 +359,71 @@ function RoomBook({ book, index, selected, match, profile, onSelect }: { book: B
     {book.states[profile].status === "Reading" && <mesh position={[width * .28, height * .47, .33]}>
       <boxGeometry args={[.06, .2, .03]} /><meshBasicMaterial color={profile === "Dan" ? "#a96b4c" : "#c59a62"} />
     </mesh>}
+    <mesh position={[0,0,.25]} onPointerOver={(event) => { event.stopPropagation(); setHovered(true); }} onPointerOut={() => setHovered(false)}>
+      <boxGeometry args={[Math.max(.36, width + .16), height + .14, .82]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
+    </mesh>
   </group>;
 }
 
-function Ladder({ selectedId }: { selectedId: number | null }) {
+function Ladder({ selectedIndex, motion, reduced }: { selectedIndex: number | null; motion: React.RefObject<LadderMotion>; reduced: boolean }) {
   const ref = useRef<THREE.Group>(null);
+  const wheelRefs = useRef<Array<THREE.Group | null>>([]);
+  const previousX = useRef(-3.2);
   const wood = usePBRSet("dark-wood", [1.1, 2.5]);
-  const targetX = selectedId ? positionFor(selectedId - 1).x : -3.2;
+  const selectedPosition = selectedIndex !== null ? positionFor(selectedIndex) : null;
+  const targetX = selectedPosition && selectedPosition.row >= 2 ? ladderTargetFor(selectedPosition) : -3.2;
   useFrame((_, dt) => {
-    if (ref.current) ref.current.position.x = THREE.MathUtils.damp(ref.current.position.x, targetX, 3.8, dt);
+    if (!ref.current || !motion.current) return;
+    const step = Math.min(dt, .05);
+    const previous = ref.current.position.x;
+    let velocity = motion.current.velocity;
+    let next = targetX;
+    if (!reduced) {
+      velocity += (targetX - previous) * 34 * step;
+      velocity *= Math.exp(-10.5 * step);
+      next = previous + velocity * step;
+    } else velocity = 0;
+    ref.current.position.x = next;
+    ref.current.rotation.z = THREE.MathUtils.damp(ref.current.rotation.z, -.035 - velocity * .008, 7, dt);
+    const travelled = next - previousX.current;
+    wheelRefs.current.forEach(wheel => { if (wheel) wheel.rotation.z -= travelled / .145; });
+    previousX.current = next;
+    motion.current.x = next;
+    motion.current.velocity = velocity;
+    motion.current.targetX = targetX;
+    motion.current.arrived = Math.abs(next - targetX) < .045 && Math.abs(velocity) < .09;
   });
-  return <group ref={ref} position={[-3.2, 0, 2.05]} rotation={[0, 0, -.105]}>
-    {[-.5,.5].map(side=><group key={side} position={[side,2.05,0]}>
-      <RoundedBox args={[.145,4.3,.18]} radius={.035} smoothness={4} castShadow><meshStandardMaterial {...wood} color="#8d5833" roughness={.48} normalScale={new THREE.Vector2(.32,.32)} /></RoundedBox>
-      <mesh position={[0,2.15,0]}><sphereGeometry args={[.095,20,14]} /><meshStandardMaterial {...wood} color="#9d6841" roughness={.45} /></mesh>
-      {[-1.87,-.85,.18,1.21].map(y=><mesh key={y} position={[side*.04,y,.105]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.018,.018,.035,12]} /><meshStandardMaterial color="#b68a4c" metalness={.78} roughness={.22} /></mesh>)}
+  return <group ref={ref} position={[-3.2, -.48, 2.43]} rotation={[-.16, 0, -.035]}>
+    {[-.5,.5].map(side=><group key={side} position={[side,3.08,0]}>
+      <RoundedBox args={[.15,6.16,.2]} radius={.038} smoothness={5} castShadow><meshStandardMaterial {...wood} color="#86502f" roughness={.46} normalScale={new THREE.Vector2(.34,.34)} /></RoundedBox>
+      <mesh position={[0,3.08,0]}><sphereGeometry args={[.1,24,16]} /><meshStandardMaterial {...wood} color="#9d6841" roughness={.43} /></mesh>
+      {[-2.78,-1.4,0,1.4,2.78].map(y=><mesh key={y} position={[side*.04,y,.112]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.019,.019,.038,14]} /><meshStandardMaterial color="#c09557" metalness={.78} roughness={.2} /></mesh>)}
     </group>)}
-    {Array.from({ length: 10 }, (_, i) => <group key={i} position={[0, .25 + i * .4, .02]}>
-      <RoundedBox args={[1.08,.095,.22]} radius={.018} smoothness={3} castShadow><meshStandardMaterial {...wood} color="#9c6339" roughness={.52} /></RoundedBox>
-      <mesh position={[0,.052,.02]}><boxGeometry args={[.94,.012,.18]} /><meshStandardMaterial color="#bb8150" roughness={.5} /></mesh>
+    {Array.from({ length: 14 }, (_, i) => <group key={i} position={[0, .26 + i * .425, .02]}>
+      <RoundedBox args={[1.1,.1,.235]} radius={.02} smoothness={4} castShadow><meshStandardMaterial {...wood} color="#9b6038" roughness={.5} /></RoundedBox>
+      <mesh position={[0,.057,.035]}><boxGeometry args={[.96,.014,.19]} /><meshStandardMaterial color="#c1844d" roughness={.46} /></mesh>
       {[-.42,.42].map(bolt=><mesh key={bolt} position={[bolt,0,.122]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.018,.018,.018,10]} /><meshStandardMaterial color="#b0874f" metalness={.72} roughness={.25} /></mesh>)}
     </group>)}
-    <mesh position={[0, 4.22, -.05]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[.105, .105, 1.22, 24]} /><meshStandardMaterial color="#a47a43" metalness={.72} roughness={.2} /></mesh>
-    <mesh position={[0,4.22,-.05]} rotation={[0,0,Math.PI/2]}><torusGeometry args={[.112,.016,8,30]} /><meshStandardMaterial color="#d0a767" metalness={.78} roughness={.18} /></mesh>
-    {[-.48, .48].map(x => <group key={x} position={[x, -.04, .03]}>
-      <mesh rotation={[0, Math.PI / 2, 0]}><torusGeometry args={[.145, .038, 12, 28]} /><meshStandardMaterial color="#241c18" metalness={.45} roughness={.38} /></mesh>
-      <mesh rotation={[0,0,Math.PI/2]}><cylinderGeometry args={[.04, .04, .2, 16]} /><meshStandardMaterial color="#b28a50" metalness={.7} /></mesh>
-      <mesh position={[0,.16,-.02]}><boxGeometry args={[.16,.28,.09]} /><meshStandardMaterial color="#8d6c42" metalness={.68} roughness={.28} /></mesh>
+    <mesh position={[0, 6.12, 0]} rotation={[0, 0, Math.PI / 2]} castShadow><cylinderGeometry args={[.11, .11, 1.24, 28]} /><meshStandardMaterial color="#a47a43" metalness={.72} roughness={.2} /></mesh>
+    {[-.48, .48].map((x,index) => <group key={x} ref={node => { wheelRefs.current[index] = node; }} position={[x, .05, .015]}>
+      <mesh><torusGeometry args={[.145, .04, 14, 32]} /><meshStandardMaterial color="#221b17" metalness={.42} roughness={.4} /></mesh>
+      <mesh rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.042, .042, .2, 18]} /><meshStandardMaterial color="#b28a50" metalness={.72} roughness={.22} /></mesh>
+      <mesh position={[0,.17,-.01]}><boxGeometry args={[.17,.29,.1]} /><meshStandardMaterial color="#8d6c42" metalness={.68} roughness={.28} /></mesh>
     </group>)}
-    {[-.46, .46].map(x => <group key={x} position={[x, 4.28, -.18]}>
-      <mesh rotation={[Math.PI / 2, 0, 0]}><torusGeometry args={[.17, .035, 10, 28, Math.PI * 1.25]} /><meshStandardMaterial color="#b38a52" metalness={.72} roughness={.2} /></mesh>
-      <mesh position={[0,-.03,.14]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.055,.055,.12,16]} /><meshStandardMaterial color="#d1ae6c" metalness={.8} roughness={.16} /></mesh>
+    {[-.46, .46].map(x => <group key={x} position={[x, 6.1, -.015]}>
+      <mesh rotation={[0,Math.PI/2,0]}><torusGeometry args={[.18, .035, 12, 32, Math.PI * 1.35]} /><meshStandardMaterial color="#b38a52" metalness={.76} roughness={.18} /></mesh>
+      <mesh position={[0,.04,.15]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.058,.058,.13,18]} /><meshStandardMaterial color="#d1ae6c" metalness={.82} roughness={.15} /></mesh>
+      <mesh position={[0,-.2,.01]}><boxGeometry args={[.16,.3,.08]} /><meshStandardMaterial color="#9c7645" metalness={.68} roughness={.24} /></mesh>
     </group>)}
-    <group position={[0,2.15,-.12]}>
-      {[-.56,.56].map(x=><mesh key={x} position={[x,0,0]} rotation={[0,0,x>0?-.1:.1]}><boxGeometry args={[.07,3.65,.045]} /><meshStandardMaterial color="#9b7246" metalness={.5} roughness={.3} /></mesh>)}
-      {[.45,1.55,2.65,3.7].map(y=><mesh key={y} position={[0,y-2.15,0]}><boxGeometry args={[1.14,.035,.05]} /><meshStandardMaterial color="#aa7e4c" metalness={.5} roughness={.28} /></mesh>)}
+    <group position={[0,3.08,-.125]}>
+      {[-.56,.56].map(x=><mesh key={x} position={[x,0,0]} rotation={[0,0,x>0?-.07:.07]}><boxGeometry args={[.065,5.62,.05]} /><meshStandardMaterial color="#9b7246" metalness={.5} roughness={.3} /></mesh>)}
+      {[.7,2.05,3.4,4.75,5.55].map(y=><mesh key={y} position={[0,y-3.08,0]}><boxGeometry args={[1.14,.035,.055]} /><meshStandardMaterial color="#aa7e4c" metalness={.5} roughness={.28} /></mesh>)}
     </group>
+    <mesh position={[0,6.12,-.03]} rotation={[0,0,Math.PI/2]}><cylinderGeometry args={[.03,.03,1.05,16]} /><meshStandardMaterial color="#d3af6c" metalness={.82} roughness={.18} /></mesh>
   </group>;
 }
 
-function FireSheet() {
+function FireSheet({ reduced }: { reduced: boolean }) {
   const material = useMemo(() => new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -327,20 +455,58 @@ function FireSheet() {
       }
     `,
   }), []);
-  useFrame(({ clock }) => { material.uniforms.uTime.value = clock.elapsedTime; });
-  return <mesh position={[0,.63,.59]} material={material}><planeGeometry args={[1.2,1.15]} /></mesh>;
+  useFrame(({ clock }) => { material.uniforms.uTime.value = reduced ? 1.5 : clock.elapsedTime; });
+  material.side = THREE.DoubleSide;
+  material.toneMapped = false;
+  return <group position={[0,.63,.59]}>
+    <mesh material={material}><planeGeometry args={[1.2,1.15,1,12]} /></mesh>
+    <mesh material={material} position={[-.08,-.05,-.035]} rotation={[0,.42,.03]} scale={[.72,.88,.72]}><planeGeometry args={[1.2,1.15,1,12]} /></mesh>
+    <mesh material={material} position={[.1,-.1,-.06]} rotation={[0,-.38,-.04]} scale={[.58,.72,.58]}><planeGeometry args={[1.2,1.15,1,12]} /></mesh>
+  </group>;
 }
 
-function Fireplace({ dark }: { dark: boolean }) {
+function FireEmbers({ reduced }: { reduced: boolean }) {
+  const ref = useRef<THREE.Points>(null);
+  const count = reduced ? 8 : 24;
+  const data = useMemo(() => {
+    const positions = new Float32Array(count * 3);
+    const phases = new Float32Array(count);
+    const speeds = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      phases[i] = ((i * 37) % count) / count;
+      speeds[i] = .18 + (i % 7) * .025;
+    }
+    return { positions, phases, speeds };
+  }, [count]);
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const t = clock.elapsedTime;
+    for (let i = 0; i < count; i++) {
+      const rise = (data.phases[i] + t * data.speeds[i]) % 1;
+      data.positions[i * 3] = Math.sin(t * 1.7 + i * 2.31) * (.08 + rise * .24);
+      data.positions[i * 3 + 1] = .24 + rise * 1.28;
+      data.positions[i * 3 + 2] = .61 + Math.cos(t * 1.2 + i) * .045;
+    }
+    ref.current.geometry.attributes.position.needsUpdate = true;
+  });
+  return <points ref={ref}>
+    <bufferGeometry><bufferAttribute attach="attributes-position" args={[data.positions,3]} /></bufferGeometry>
+    <pointsMaterial color="#ff9b45" size={reduced ? .018 : .028} sizeAttenuation transparent opacity={.82} depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
+  </points>;
+}
+
+function Fireplace({ dark, reduced }: { dark: boolean; reduced: boolean }) {
   const light = useRef<THREE.PointLight>(null);
   const flames = useRef<THREE.Group>(null);
   const stone = usePBRSet("stone", [2.2, 2]);
   const wood = usePBRSet("dark-wood", [1.1, 2.5]);
   useFrame(({ clock }) => {
-    if (light.current) light.current.intensity = (dark ? 4.8 : 1.5) + Math.sin(clock.elapsedTime * 9) * .28 + Math.sin(clock.elapsedTime * 4.3) * .18;
+    const t = clock.elapsedTime;
+    const flicker = Math.sin(t * 2.17) * .22 + Math.sin(t * 5.43 + 1.2) * .12 + Math.sin(t * 11.7) * .055;
+    if (light.current) light.current.intensity = (dark ? 5.25 : 1.7) + flicker * (reduced ? .18 : 1);
     if (flames.current) {
-      flames.current.scale.y = 1 + Math.sin(clock.elapsedTime * 8.7) * .08;
-      flames.current.rotation.y = Math.sin(clock.elapsedTime * 4.1) * .035;
+      flames.current.scale.y = 1 + flicker * (reduced ? .018 : .1);
+      flames.current.rotation.y = flicker * (reduced ? .006 : .045);
     }
   });
   return <group position={[-4.9, -.2, 1.55]}>
@@ -362,16 +528,13 @@ function Fireplace({ dark }: { dark: boolean }) {
       <pointLight position={[0,.2,.25]} intensity={dark ? .35 : .06} distance={2.2} color="#ffc875" />
       <mesh position={[0,-.28,0]}><cylinderGeometry args={[.12,.18,.08,18]} /><meshStandardMaterial color="#8b6a3e" metalness={.6} roughness={.3} /></mesh>
     </group>)}
-    <FireSheet />
+    <FireSheet reduced={reduced} />
+    <FireEmbers reduced={reduced} />
     <group position={[0,.33,.62]}>
       <mesh position={[0,-.05,-.04]} rotation={[-Math.PI/2,0,0]}><cylinderGeometry args={[.46,.52,.06,24]} /><meshStandardMaterial color="#201713" roughness={1} /></mesh>
       {Array.from({length:13},(_,i)=>{const a=i*2.399;const radius=.08+.032*i;return <mesh key={i} position={[Math.cos(a)*radius,.02+(i%3)*.025,Math.sin(a)*radius]}><dodecahedronGeometry args={[.045+(i%3)*.012,0]} /><meshStandardMaterial color={i%3===0?"#d75b28":"#6d2618"} emissive={i%3===0?"#e45b22":"#2e0c07"} emissiveIntensity={dark?2.8:.8} roughness={.9} /></mesh>})}
     </group>
-    <group ref={flames} scale={[.65,.55,.65]}>
-      {[[-.28, .49], [0, .46], [.28, .51]].map(([x, y], i) => <Float key={i} speed={2 + i} floatIntensity={.055}>
-        <mesh position={[x, y, .54]} rotation={[0, 0, i === 1 ? 0 : .13 * (i ? -1 : 1)]}><coneGeometry args={[.17 + i * .018, .5 + i * .07, 18]} /><meshBasicMaterial color={i === 1 ? "#ffd989" : "#e86d33"} transparent opacity={.82} blending={THREE.AdditiveBlending} /></mesh>
-      </Float>)}
-    </group>
+    <group ref={flames} />
     {[-.28,.26].map((x,i)=><mesh key={x} position={[x,.27,.57]} rotation={[Math.PI/2,0,i ? -.28 : .3]}><cylinderGeometry args={[.075,.1,.72,9]} /><meshStandardMaterial color="#3b1c12" roughness={1} /></mesh>)}
     <group position={[0,.52,.66]}>
       {[-.42,-.14,.14,.42].map(x=><mesh key={x} position={[x,0,0]} rotation={[0,0,.07*x]}><boxGeometry args={[.025,.66,.035]} /><meshStandardMaterial color="#25211f" metalness={.78} roughness={.34} /></mesh>)}
@@ -448,38 +611,40 @@ function Architecture({ dark }: { dark: boolean }) {
   </>;
 }
 
-function FloatingCandles({ dark }: { dark: boolean }) {
+function FloatingCandles({ dark, reduced }: { dark: boolean; reduced: boolean }) {
   const positions: Array<[number, number, number, number]> = [
     [-4.2,4.35,3.5,.08],[-2.6,5.05,4.1,-.05],[2.8,4.55,3.8,.04],[4.25,5.15,4.5,-.06],[.95,5.3,5.0,.03],
   ];
   return <group>
-    {positions.map(([x,y,z,tilt],i)=><Float key={i} speed={.45+i*.07} floatIntensity={.07} rotationIntensity={.03}>
-      <group position={[x,y,z]} rotation={[0,0,tilt]}>
+    {positions.map(([x,y,z,tilt],i)=>{
+      const candle = <group position={[x,y,z]} rotation={[0,0,tilt]}>
         <mesh castShadow><cylinderGeometry args={[.055,.07,.5,16]} /><meshStandardMaterial color="#dfd1ae" roughness={.82} /></mesh>
+        <mesh position={[0,.255,0]}><cylinderGeometry args={[.008,.008,.08,8]} /><meshStandardMaterial color="#2b211b" roughness={1} /></mesh>
+        <mesh position={[.047,.08,.058]} rotation={[0,0,.35]}><sphereGeometry args={[.025,8,6]} /><meshStandardMaterial color="#c8b991" roughness={.9} /></mesh>
         <mesh position={[0,.285,0]}><coneGeometry args={[.052,.17,14]} /><meshBasicMaterial color="#ffbf5b" transparent opacity={.9} blending={THREE.AdditiveBlending} /></mesh>
         <mesh position={[0,.3,0]}><sphereGeometry args={[.035,10,8]} /><meshBasicMaterial color="#fff0ae" /></mesh>
         {(i===0 || i===3) && <pointLight position={[0,.28,.1]} intensity={dark ? .42 : .04} distance={2.8} decay={2} color="#ffca74" />}
-      </group>
-    </Float>)}
+      </group>;
+      return reduced ? <group key={i}>{candle}</group> : <Float key={i} speed={.45+i*.07} floatIntensity={.07} rotationIntensity={.03}>{candle}</Float>;
+    })}
   </group>;
 }
 
-function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: Props & { focus: "shelves" | "corner" }) {
+function Scene({ books, theme, selectedId, search, profile, onSelect, focus, motion, ladder, reduced, compact }: Props & { focus: "shelves" | "corner"; motion: React.RefObject<CameraMotion>; ladder: React.RefObject<LadderMotion>; reduced: boolean; compact: boolean }) {
   const dark = theme === "dark";
   const floor = usePBRSet("floor", [5, 4]);
+  const placements = useMemo(() => createRoomPlacements(books), [books]);
+  const selectedIndex = selectedId ? placements.get(selectedId) ?? null : null;
   const q = search.trim().toLowerCase();
-  const matches = useMemo(() => new Set(books.filter(b => q && `${b.title} ${b.author}`.toLowerCase().includes(q)).map(b => b.id)), [books, q]);
+  const matches = useMemo(() => new Set(books.filter(b => q && `${b.title} ${b.author} ${b.genre} ${b.series || ""}`.toLowerCase().includes(q)).map(b => b.id)), [books, q]);
   return <>
-    <color attach="background" args={[dark ? "#120e0c" : "#b8aa91"]} />
-    <fog attach="fog" args={[dark ? "#120e0c" : "#b8aa91", 9, 23]} />
-    <ambientLight intensity={dark ? .68 : .85} color={dark ? "#aa8068" : "#ffe9c9"} />
-    <hemisphereLight intensity={dark ? .5 : .75} color={dark ? "#647694" : "#d9edf1"} groundColor={dark ? "#6a3723" : "#8d5c3c"} />
-    <directionalLight position={[7, 8, 7]} intensity={dark ? .9 : 2.25} color={dark ? "#8f9db8" : "#fff0cf"} castShadow shadow-mapSize={[2048, 2048]} shadow-bias={-.0005} />
-    <spotLight position={[0, 7, 4]} angle={.62} penumbra={.85} intensity={q ? 1.5 : .55} color="#e9bd79" castShadow={false} />
-    <pointLight position={[0,5.4,2.5]} intensity={dark ? .65 : .3} color="#e3bd7b" distance={9} decay={2} />
-    <rectAreaLight position={[0,3.8,5.2]} rotation={[0,Math.PI,0]} width={14} height={4.5} intensity={dark ? .62 : .82} color={dark ? "#d3a078" : "#ffe4bd"} />
-    <CameraRig selectedId={selectedId} focus={focus} />
-    <FilmicTone dark={dark} />
+    <AtmosphereRig dark={dark} searching={Boolean(q)} compact={compact} />
+    <Environment resolution={compact ? 64 : 128} frames={1}>
+      <Lightformer form="rect" intensity={dark ? 1.1 : 2.2} color={dark ? "#d49b76" : "#fff0d0"} position={[0,7,6]} rotation={[Math.PI/2,0,0]} scale={[12,8,1]} />
+      <Lightformer form="rect" intensity={dark ? .7 : 1.35} color={dark ? "#7f91b2" : "#c6e3eb"} position={[8,3,2]} rotation={[0,-Math.PI/2,0]} scale={[5,4,1]} />
+      <Lightformer form="ring" intensity={dark ? .55 : .35} color="#e3ad73" position={[-5,2,3]} rotation={[0,Math.PI/2,0]} scale={2.5} />
+    </Environment>
+    <CameraRig selectedIndex={selectedIndex} focus={focus} motion={motion} ladder={ladder} />
     <mesh position={[0, -.61, 1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
       <planeGeometry args={[19, 16]} /><meshStandardMaterial {...floor} color={dark ? "#5a3827" : "#8a6145"} roughness={.78} normalScale={new THREE.Vector2(.32,.32)} />
     </mesh>
@@ -488,13 +653,13 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
     </RoundedBox>)}
     <Architecture dark={dark} />
     <Rug />
-    <FloatingCandles dark={dark} />
+    <FloatingCandles dark={dark} reduced={reduced} />
     {bays.map(x => <ShelfBay key={x} x={x} />)}
     {bays.map(x => <pointLight key={`shelf-light-${x}`} position={[x,5.45,2.15]} intensity={dark ? .48 : .08} color="#efb96f" distance={4.4} decay={2} />)}
-    {books.map((book, index) => <RoomBook key={book.id} book={book} index={index} selected={selectedId === book.id} match={matches.has(book.id)} profile={profile} onSelect={() => onSelect(book.id)} />)}
+    {books.map((book, index) => <RoomBook key={book.id} book={book} index={placements.get(book.id) ?? index} selected={selectedId === book.id} match={matches.has(book.id)} profile={profile} ladder={ladder} interaction={motion} reduced={reduced} onSelect={() => onSelect(book.id)} />)}
     <mesh position={[0, 5.65, 1.45]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[.055, .055, 14.4, 16]} /><meshStandardMaterial color="#a9804b" metalness={.65} roughness={.25} /></mesh>
-    <Ladder selectedId={selectedId} />
-    <Fireplace dark={dark} />
+    <Ladder selectedIndex={selectedIndex} motion={ladder} reduced={reduced} />
+    <Fireplace dark={dark} reduced={reduced} />
     <ReadingCorner dark={dark} />
     <DetailedModel src="/models/vintage_grandfather_clock_01/model.gltf" position={[7.18,-.52,.34]} rotation={[0,-.18,0]} scale={1.06} />
     <group position={[0,5.9,3.8]}>
@@ -505,21 +670,78 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
         <pointLight intensity={dark ? .22 : .08} distance={2.4} color="#ffd99a" />
       </group>})}
     </group>
-    <ContactShadows position={[0,-.555,2.2]} scale={17} opacity={dark ? .48 : .36} blur={2.4} far={5.5} color="#140b07" frames={1} />
-    {!q && <Sparkles count={dark ? 22 : 12} scale={[13, 5, 5]} size={.7} speed={.12} opacity={.18} color="#f6ddb2" />}
+    <ContactShadows position={[0,-.555,2.2]} scale={17} opacity={dark ? .48 : .36} blur={2.4} far={5.5} color="#140b07" frames={selectedId ? (compact ? 14 : 28) : 1} />
+    {!q && !reduced && <Sparkles count={compact ? 6 : dark ? 18 : 10} scale={[13, 5, 5]} size={.65} speed={.1} opacity={.15} color="#f6ddb2" />}
   </>;
 }
 
 export default function LibraryRoom(props: Props) {
   const [focus, setFocus] = useState<"shelves" | "corner">("shelves");
-  return <div className="room-canvas" aria-label="Interactive three-dimensional library room">
-    <Canvas shadows dpr={[1, 1.75]} camera={{ position: [1.8, 2.95, 14.15], fov: 42 }} gl={{ antialias: true, powerPreference: "high-performance" }}>
-      <Scene {...props} focus={focus} />
+  const [cameraDirty, setCameraDirty] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [reduced, setReduced] = useState(false);
+  const [compact, setCompact] = useState(false);
+  const motion = useRef<CameraMotion>({ yaw: 0, pitch: 0, dolly: 0, velocityYaw: 0, velocityPitch: 0, dragging: false, suppressClickUntil: 0, reduced: false });
+  const ladder = useRef<LadderMotion>({ x: -3.2, velocity: 0, arrived: true, targetX: -3.2 });
+  const gesture = useRef({ x: 0, y: 0, moved: false, pinchDistance: 0, pointers: new Map<number, { x: number; y: number }>() });
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const compactMedia = window.matchMedia("(max-width: 860px)");
+    const update = () => { setReduced(media.matches); motion.current.reduced = media.matches; };
+    const updateCompact = () => setCompact(compactMedia.matches);
+    update(); updateCompact(); media.addEventListener("change", update); compactMedia.addEventListener("change", updateCompact);
+    return () => { media.removeEventListener("change", update); compactMedia.removeEventListener("change", updateCompact); };
+  }, []);
+  const resetCamera = () => {
+    Object.assign(motion.current, { yaw: 0, pitch: 0, dolly: 0, velocityYaw: 0, velocityPitch: 0 });
+    setCameraDirty(false);
+  };
+  const pointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gesture.current.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    gesture.current.x = event.clientX; gesture.current.y = event.clientY; gesture.current.moved = false;
+    motion.current.dragging = true; setDragging(true);
+  };
+  const pointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!gesture.current.pointers.has(event.pointerId)) return;
+    const previous = gesture.current.pointers.get(event.pointerId)!;
+    gesture.current.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (gesture.current.pointers.size >= 2) {
+      const [a,b] = [...gesture.current.pointers.values()];
+      const distance = Math.hypot(a.x-b.x,a.y-b.y);
+      if (gesture.current.pinchDistance) motion.current.dolly = THREE.MathUtils.clamp(motion.current.dolly - (distance-gesture.current.pinchDistance)*.012,-2.5,2.8);
+      gesture.current.pinchDistance = distance; gesture.current.moved = true; setCameraDirty(true); return;
+    }
+    const dx = event.clientX - previous.x, dy = event.clientY - previous.y;
+    if (Math.abs(dx)+Math.abs(dy) > 1) gesture.current.moved = true;
+    const yawDelta = -dx * (event.pointerType === "touch" ? .0042 : .0032);
+    const pitchDelta = dy * (event.pointerType === "touch" ? .0036 : .0028);
+    motion.current.yaw = THREE.MathUtils.clamp(motion.current.yaw + yawDelta,-1.2,1.2);
+    motion.current.pitch = THREE.MathUtils.clamp(motion.current.pitch + pitchDelta,-.52,.58);
+    motion.current.velocityYaw = yawDelta; motion.current.velocityPitch = pitchDelta;
+    if (gesture.current.moved) setCameraDirty(true);
+  };
+  const pointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    gesture.current.pointers.delete(event.pointerId);
+    if (gesture.current.pointers.size < 2) gesture.current.pinchDistance = 0;
+    if (!gesture.current.pointers.size) {
+      motion.current.dragging = false; setDragging(false);
+      if (gesture.current.moved) motion.current.suppressClickUntil = Date.now()+220;
+    }
+  };
+  const changeFocus = (next: "shelves" | "corner") => { setFocus(next); resetCamera(); props.onClear(); };
+  return <div className={`room-canvas ${dragging ? "is-dragging" : ""}`} aria-label="Interactive three-dimensional library room. Drag to look around, pinch or scroll to move closer." tabIndex={0}
+    onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
+    onWheel={event => { if ((event.target as HTMLElement).closest("button")) return; motion.current.dolly = THREE.MathUtils.clamp(motion.current.dolly + event.deltaY*.0025,-2.5,2.8); setCameraDirty(true); }}>
+    <Canvas shadows dpr={compact ? [1, 1.25] : [1, 1.7]} camera={{ position: [1.8, 2.95, 14.15], fov: 42 }} gl={{ antialias: true, powerPreference: "high-performance" }} onPointerMissed={() => { if (Date.now() >= motion.current.suppressClickUntil) props.onClear(); }}>
+      <Scene {...props} focus={focus} motion={motion} ladder={ladder} reduced={reduced} compact={compact} />
     </Canvas>
     <div className="room-plaque">D &amp; L <span>OUR LIBRARY</span></div>
+    {cameraDirty && <button className="room-camera-reset" onClick={resetCamera}>Reset view</button>}
     <div className="room-mobile-focus" aria-label="Room viewpoint">
-      <button className={focus === "shelves" ? "active" : ""} onClick={() => setFocus("shelves")}>Fire &amp; ladder</button>
-      <button className={focus === "corner" ? "active" : ""} onClick={() => setFocus("corner")}>Reading corner</button>
+      <button className={focus === "shelves" ? "active" : ""} aria-pressed={focus === "shelves"} onClick={() => changeFocus("shelves")}>Fire &amp; ladder</button>
+      <button className={focus === "corner" ? "active" : ""} aria-pressed={focus === "corner"} onClick={() => changeFocus("corner")}>Reading corner</button>
     </div>
   </div>;
 }

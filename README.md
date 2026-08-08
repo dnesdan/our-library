@@ -6,7 +6,7 @@ A polished, interactive concept for Dan and Lucia's shared ebook collection. The
 
 - 44-book responsive catalog with search, filters, favorites, profile-specific progress, and tactile covers
 - Shared profiles for Dan and Lucia, with device-local persistence
-- Interactive Three.js room with wooden shelves, clickable books, rolling ladder, fireplace, lamp, chair, decor, and day/night lighting
+- Interactive Three.js room with constrained mouse/touch camera movement, spatial book navigation, a physically rolling ladder, layered fireplace flames and embers, a reading lamp, detailed furniture, and cinematic day/night lighting
 - Browser reader with chapters, keyboard/swipe navigation, bookmarks, table of contents, themes, typography, spacing, width, and reading modes
 - Desktop keyboard shortcuts, touch-focused mobile layouts, and reduced-motion support
 
@@ -22,6 +22,8 @@ npm run dev
 ```bash
 npm run build
 ```
+
+Run the production build plus application-shell regression checks with `npm test`.
 
 The project uses vinext and is configured for Sites hosting through `.openai/hosting.json`.
 
