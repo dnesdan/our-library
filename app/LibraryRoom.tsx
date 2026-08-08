@@ -1,7 +1,7 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { ContactShadows, Float, RoundedBox, Sparkles, useTexture } from "@react-three/drei";
+import { ContactShadows, Float, RoundedBox, Sparkles, useGLTF, useTexture } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Book, Profile } from "./data";
@@ -16,9 +16,24 @@ type Props = {
 };
 
 const bays = [-5.25, -1.75, 1.75, 5.25];
-const rows = [0.25, 1.75, 3.25, 4.75];
+const rows = [-0.42, 1.08, 2.58, 4.08];
 
 type PBRSet = { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture };
+
+function DetailedModel({ src, ...props }: { src: string } & Omit<React.ComponentProps<"group">, "children">) {
+  const { scene } = useGLTF(src);
+  const model = useMemo(() => scene.clone(true), [scene]);
+  useEffect(() => {
+    model.traverse((node) => {
+      if (node instanceof THREE.Mesh) {
+        node.castShadow = true;
+        node.receiveShadow = true;
+        node.material.envMapIntensity = .7;
+      }
+    });
+  }, [model]);
+  return <group {...props}><primitive object={model} /></group>;
+}
 
 function usePBRSet(name: "dark-wood" | "stone" | "floor", repeat: [number, number]): PBRSet {
   const textures = useTexture([
@@ -58,6 +73,49 @@ function positionFor(index: number) {
   const row = Math.floor(index / 4) % 4;
   const slot = Math.floor(index / 16) % 3;
   return { x: bays[bay] - .66 + slot * .62, y: rows[row], z: .92, bay, row };
+}
+
+function useSpineTexture(book: Book) {
+  return useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = book.color;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const sheen = ctx.createLinearGradient(0,0,128,0);
+    sheen.addColorStop(0,"rgba(0,0,0,.28)");
+    sheen.addColorStop(.18,"rgba(255,255,255,.08)");
+    sheen.addColorStop(.55,"rgba(255,255,255,.03)");
+    sheen.addColorStop(1,"rgba(0,0,0,.2)");
+    ctx.fillStyle = sheen;
+    ctx.fillRect(0,0,128,512);
+    ctx.fillStyle = book.accent;
+    ctx.fillRect(8, 38, 112, 5);
+    ctx.fillRect(8, 468, 112, 5);
+    ctx.strokeStyle = book.accent;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(15, 62, 98, 388);
+    ctx.save();
+    ctx.translate(64, 256);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = "#ead6a6";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "600 22px Georgia, serif";
+    const title = book.title.length > 24 ? `${book.title.slice(0, 23)}…` : book.title;
+    ctx.fillText(title.toUpperCase(), 0, -9, 350);
+    ctx.font = "italic 15px Georgia, serif";
+    ctx.fillStyle = "rgba(244,225,184,.86)";
+    ctx.fillText(book.author, 0, 20, 330);
+    ctx.restore();
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = 4;
+    return texture;
+  }, [book]);
 }
 
 function CameraRig({ selectedId, focus }: { selectedId: number | null; focus: "shelves" | "corner" }) {
@@ -106,16 +164,30 @@ function ShelfBay({ x }: { x: number }) {
     </mesh>)}
     <mesh position={[-1.46, 2.45, .82]}><boxGeometry args={[.13, 6.05, .72]} /><meshStandardMaterial {...wood} color="#68402b" roughness={.65} /></mesh>
     <mesh position={[1.46, 2.45, .82]}><boxGeometry args={[.13, 6.05, .72]} /><meshStandardMaterial {...wood} color="#68402b" roughness={.65} /></mesh>
+    {[-1.49,1.49].map(side => <group key={`pilaster-${side}`} position={[side,2.47,1.18]}>
+      <mesh castShadow><cylinderGeometry args={[.12,.15,5.55,20]} /><meshStandardMaterial {...wood} color="#755039" roughness={.54} /></mesh>
+      {[-2.63,-2.48,2.48,2.63].map(y => <mesh key={y} position={[0,y,0]}><torusGeometry args={[.145,.025,8,20]} /><meshStandardMaterial color="#a17a4c" metalness={.1} roughness={.46} /></mesh>)}
+      <mesh position={[0,-2.86,0]} castShadow><cylinderGeometry args={[.23,.16,.28,6]} /><meshStandardMaterial {...wood} color="#68412b" roughness={.6} /></mesh>
+      <mesh position={[0,2.86,0]} rotation={[0,0,Math.PI]} castShadow><cylinderGeometry args={[.23,.16,.28,6]} /><meshStandardMaterial {...wood} color="#68412b" roughness={.6} /></mesh>
+    </group>)}
     {rows.map((y, row) => Array.from({ length: 11 }, (_, slot) => {
       const height = .78 + ((slot * 7 + row * 3) % 5) * .075;
       const width = .18 + ((slot * 5 + row) % 3) * .035;
       return <group key={`${row}-${slot}`} position={[-1.22 + slot * .245, y + height / 2, .94]} rotation={[0, 0, ((slot + row) % 7 === 0 ? -.035 : 0)]}>
-        <mesh castShadow><boxGeometry args={[width, height, .42]} /><meshStandardMaterial color={palette[(slot + row * 2) % palette.length]} roughness={.6} /></mesh>
+        <RoundedBox args={[width, height, .42]} radius={.015} smoothness={2} castShadow><meshStandardMaterial color={palette[(slot + row * 2) % palette.length]} roughness={.6} /></RoundedBox>
+        <mesh position={[width*.51,0,0]}><boxGeometry args={[.012,height*.88,.36]} /><meshStandardMaterial color="#d4c5aa" roughness={.96} /></mesh>
+        {Array.from({length:4},(_,page)=><mesh key={page} position={[width*.519,-height*.3+page*height*.19,.015]}><boxGeometry args={[.004,.006,.33]} /><meshBasicMaterial color="#8f8068" transparent opacity={.45} /></mesh>)}
         {(slot + row) % 3 === 0 && <mesh position={[0, height * .22, .216]}><boxGeometry args={[width * .72, .018, .008]} /><meshBasicMaterial color="#c7a56c" /></mesh>}
         {(slot + row) % 4 === 0 && <mesh position={[0, -height * .2, .216]}><boxGeometry args={[width * .72, .012, .008]} /><meshBasicMaterial color="#d0b986" /></mesh>}
       </group>;
     }))}
-    <mesh position={[0, 5.62, .83]} castShadow><boxGeometry args={[3.35, .22, .86]} /><meshStandardMaterial {...wood} color="#815033" roughness={.58} /></mesh>
+    <mesh position={[0, 5.62, .83]} castShadow><boxGeometry args={[3.48, .22, .9]} /><meshStandardMaterial {...wood} color="#815033" roughness={.58} /></mesh>
+    <mesh position={[0,5.77,.87]} castShadow><boxGeometry args={[3.68,.11,1.02]} /><meshStandardMaterial {...wood} color="#6a4029" roughness={.56} /></mesh>
+    <mesh position={[0,-.28,.92]} castShadow><boxGeometry args={[3.42,.44,.88]} /><meshStandardMaterial {...wood} color="#5c3725" roughness={.62} /></mesh>
+    {[-.77,.77].map(cx=><group key={cx} position={[cx,-.27,1.37]}>
+      <RoundedBox args={[1.32,.29,.04]} radius={.035} smoothness={3}><meshStandardMaterial color="#42271d" roughness={.72} /></RoundedBox>
+      <mesh position={[0,0,.035]}><torusGeometry args={[.055,.012,8,20]} /><meshStandardMaterial color="#a47d45" metalness={.72} roughness={.2} /></mesh>
+    </group>)}
     <group position={[0,5.93,.82]}>
       <mesh position={[-.65,0,0]} rotation={[0,0,.42]} castShadow><boxGeometry args={[1.55,.12,.48]} /><meshStandardMaterial {...wood} color="#613a28" roughness={.62} /></mesh>
       <mesh position={[.65,0,0]} rotation={[0,0,-.42]} castShadow><boxGeometry args={[1.55,.12,.48]} /><meshStandardMaterial {...wood} color="#613a28" roughness={.62} /></mesh>
@@ -125,11 +197,16 @@ function ShelfBay({ x }: { x: number }) {
       <mesh rotation={[0, 0, side > 0 ? -.38 : .38]}><boxGeometry args={[.22, .62, .75]} /><meshStandardMaterial color="#6f4128" roughness={.62} /></mesh>
       <mesh position={[0, -.25, .03]}><sphereGeometry args={[.16, 12, 8]} /><meshStandardMaterial color="#5a321f" /></mesh>
     </group>)}
+    {[-1.23,1.23].map(side=><group key={`corbel-${side}`} position={[side,5.45,1.25]}>
+      <mesh rotation={[0,0,side>0 ? -.7 : .7]} castShadow><boxGeometry args={[.12,.58,.3]} /><meshStandardMaterial {...wood} color="#8b5b39" roughness={.5} /></mesh>
+      <mesh position={[0,-.18,.04]}><sphereGeometry args={[.11,18,12]} /><meshStandardMaterial color="#9b7148" roughness={.48} /></mesh>
+    </group>)}
   </group>;
 }
 
 function RoomBook({ book, index, selected, match, profile, onSelect }: { book: Book; index: number; selected: boolean; match: boolean; profile: Profile; onSelect: () => void }) {
   const ref = useRef<THREE.Group>(null);
+  const spine = useSpineTexture(book);
   const p = positionFor(index);
   const height = .92 + (index % 5) * .07;
   const width = .34 + (index % 3) * .07;
@@ -140,16 +217,18 @@ function RoomBook({ book, index, selected, match, profile, onSelect }: { book: B
     ref.current.rotation.y = THREE.MathUtils.damp(ref.current.rotation.y, selected ? -.11 : 0, 7, dt);
   });
   return <group ref={ref} position={[p.x, p.y + height / 2, .96]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
-    <RoundedBox args={[width, height, .55]} radius={.022} smoothness={2} castShadow>
-      <meshStandardMaterial color={book.color} roughness={.68} metalness={.015} emissive={match || selected ? book.accent : "#000000"} emissiveIntensity={match ? .32 : selected ? .18 : 0} />
+    <RoundedBox args={[width, height, .55]} radius={.022} smoothness={3} castShadow>
+      <meshStandardMaterial color={book.color} roughness={.62} metalness={.025} emissive={match || selected ? book.accent : "#000000"} emissiveIntensity={match ? .28 : selected ? .14 : 0} />
     </RoundedBox>
-    <mesh position={[width * .51,0,.015]}><boxGeometry args={[.018,height*.86,.43]} /><meshStandardMaterial color="#d8cdb6" roughness={.9} /></mesh>
-    <mesh position={[0, 0, .286]}>
-      <boxGeometry args={[width * .78, .035, .01]} />
-      <meshBasicMaterial color={book.accent} />
-    </mesh>
+    {[-1,1].map(side=><RoundedBox key={side} args={[width, .045, .58]} radius={.012} smoothness={2} position={[0,side*height*.48,0]} castShadow>
+      <meshStandardMaterial color={book.color} roughness={.62} metalness={.02} emissive={match || selected ? book.accent : "#000000"} emissiveIntensity={match ? .28 : selected ? .14 : 0} />
+    </RoundedBox>)}
+    <mesh position={[width * .46,0,.015]}><boxGeometry args={[.018,height*.84,.43]} /><meshStandardMaterial color="#d8cdb6" roughness={.96} /></mesh>
+    {Array.from({length:7},(_,page)=><mesh key={page} position={[width*.472,-height*.35+page*height*.115,.01]}><boxGeometry args={[.006,.004,.4]} /><meshBasicMaterial color="#8f8068" transparent opacity={.42} /></mesh>)}
+    <RoundedBox args={[width*.92,height*.9,.018]} radius={.015} smoothness={2} position={[0,0,.286]}><meshStandardMaterial map={spine || undefined} color={spine ? "#ffffff" : book.color} roughness={.58} /></RoundedBox>
     <mesh position={[0,height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
     <mesh position={[0,-height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
+    {[-.23,0,.23].map(rib=><mesh key={rib} position={[-width*.405,height*rib,.301]}><boxGeometry args={[width*.18,.035,.025]} /><meshStandardMaterial color={book.accent} metalness={.28} roughness={.38} /></mesh>)}
     {book.states[profile].status === "Reading" && <mesh position={[width * .28, height * .47, .33]}>
       <boxGeometry args={[.06, .2, .03]} /><meshBasicMaterial color={profile === "Dan" ? "#a96b4c" : "#c59a62"} />
     </mesh>}
@@ -164,19 +243,31 @@ function Ladder({ selectedId }: { selectedId: number | null }) {
     if (ref.current) ref.current.position.x = THREE.MathUtils.damp(ref.current.position.x, targetX, 3.8, dt);
   });
   return <group ref={ref} position={[-3.2, 0, 2.05]} rotation={[0, 0, -.105]}>
-    <mesh position={[-.48, 2.05, 0]} castShadow><boxGeometry args={[.12, 4.25, .14]} /><meshStandardMaterial {...wood} color="#8d5833" roughness={.48} /></mesh>
-    <mesh position={[.48, 2.05, 0]} castShadow><boxGeometry args={[.12, 4.25, .14]} /><meshStandardMaterial {...wood} color="#8d5833" roughness={.48} /></mesh>
-    {Array.from({ length: 10 }, (_, i) => <mesh key={i} position={[0, .25 + i * .4, .02]} castShadow>
-      <boxGeometry args={[1.04, .085, .16]} /><meshStandardMaterial {...wood} color="#9c6339" roughness={.52} />
-    </mesh>)}
-    <mesh position={[0, 4.22, -.05]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[.11, .11, 1.2, 12]} /><meshStandardMaterial color="#a47a43" metalness={.65} roughness={.22} /></mesh>
-    {[-.48, .48].map(x => <group key={x} position={[x, -.04, .03]}>
-      <mesh rotation={[Math.PI / 2, 0, 0]}><torusGeometry args={[.14, .035, 8, 18]} /><meshStandardMaterial color="#2b211b" metalness={.5} roughness={.35} /></mesh>
-      <mesh><cylinderGeometry args={[.035, .035, .18, 10]} /><meshStandardMaterial color="#a47a43" metalness={.65} /></mesh>
+    {[-.5,.5].map(side=><group key={side} position={[side,2.05,0]}>
+      <RoundedBox args={[.145,4.3,.18]} radius={.035} smoothness={4} castShadow><meshStandardMaterial {...wood} color="#8d5833" roughness={.48} normalScale={new THREE.Vector2(.32,.32)} /></RoundedBox>
+      <mesh position={[0,2.15,0]}><sphereGeometry args={[.095,20,14]} /><meshStandardMaterial {...wood} color="#9d6841" roughness={.45} /></mesh>
+      {[-1.87,-.85,.18,1.21].map(y=><mesh key={y} position={[side*.04,y,.105]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.018,.018,.035,12]} /><meshStandardMaterial color="#b68a4c" metalness={.78} roughness={.22} /></mesh>)}
     </group>)}
-    {[-.46, .46].map(x => <mesh key={x} position={[x, 4.28, -.18]} rotation={[Math.PI / 2, 0, 0]}>
-      <torusGeometry args={[.17, .035, 8, 18, Math.PI * 1.25]} /><meshStandardMaterial color="#b38a52" metalness={.72} roughness={.2} />
-    </mesh>)}
+    {Array.from({ length: 10 }, (_, i) => <group key={i} position={[0, .25 + i * .4, .02]}>
+      <RoundedBox args={[1.08,.095,.22]} radius={.018} smoothness={3} castShadow><meshStandardMaterial {...wood} color="#9c6339" roughness={.52} /></RoundedBox>
+      <mesh position={[0,.052,.02]}><boxGeometry args={[.94,.012,.18]} /><meshStandardMaterial color="#bb8150" roughness={.5} /></mesh>
+      {[-.42,.42].map(bolt=><mesh key={bolt} position={[bolt,0,.122]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.018,.018,.018,10]} /><meshStandardMaterial color="#b0874f" metalness={.72} roughness={.25} /></mesh>)}
+    </group>)}
+    <mesh position={[0, 4.22, -.05]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[.105, .105, 1.22, 24]} /><meshStandardMaterial color="#a47a43" metalness={.72} roughness={.2} /></mesh>
+    <mesh position={[0,4.22,-.05]} rotation={[0,0,Math.PI/2]}><torusGeometry args={[.112,.016,8,30]} /><meshStandardMaterial color="#d0a767" metalness={.78} roughness={.18} /></mesh>
+    {[-.48, .48].map(x => <group key={x} position={[x, -.04, .03]}>
+      <mesh rotation={[0, Math.PI / 2, 0]}><torusGeometry args={[.145, .038, 12, 28]} /><meshStandardMaterial color="#241c18" metalness={.45} roughness={.38} /></mesh>
+      <mesh rotation={[0,0,Math.PI/2]}><cylinderGeometry args={[.04, .04, .2, 16]} /><meshStandardMaterial color="#b28a50" metalness={.7} /></mesh>
+      <mesh position={[0,.16,-.02]}><boxGeometry args={[.16,.28,.09]} /><meshStandardMaterial color="#8d6c42" metalness={.68} roughness={.28} /></mesh>
+    </group>)}
+    {[-.46, .46].map(x => <group key={x} position={[x, 4.28, -.18]}>
+      <mesh rotation={[Math.PI / 2, 0, 0]}><torusGeometry args={[.17, .035, 10, 28, Math.PI * 1.25]} /><meshStandardMaterial color="#b38a52" metalness={.72} roughness={.2} /></mesh>
+      <mesh position={[0,-.03,.14]} rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.055,.055,.12,16]} /><meshStandardMaterial color="#d1ae6c" metalness={.8} roughness={.16} /></mesh>
+    </group>)}
+    <group position={[0,2.15,-.12]}>
+      {[-.56,.56].map(x=><mesh key={x} position={[x,0,0]} rotation={[0,0,x>0?-.1:.1]}><boxGeometry args={[.07,3.65,.045]} /><meshStandardMaterial color="#9b7246" metalness={.5} roughness={.3} /></mesh>)}
+      {[.45,1.55,2.65,3.7].map(y=><mesh key={y} position={[0,y-2.15,0]}><boxGeometry args={[1.14,.035,.05]} /><meshStandardMaterial color="#aa7e4c" metalness={.5} roughness={.28} /></mesh>)}
+    </group>
   </group>;
 }
 
@@ -230,11 +321,16 @@ function Fireplace({ dark }: { dark: boolean }) {
   });
   return <group position={[-4.9, -.2, 1.55]}>
     <mesh position={[0, .9, 0]} castShadow><boxGeometry args={[2.25, 2.12, .72]} /><meshStandardMaterial {...stone} color="#8b8173" roughness={.94} normalScale={new THREE.Vector2(.42,.42)} /></mesh>
+    {[-.78,-.26,.26,.78].flatMap((x,col)=>[.18,.57,.96,1.35,1.74].map((y,row)=><mesh key={`${x}-${y}`} position={[x+(row%2? .13:0),y,.375]} castShadow>
+      <RoundedBox args={[.48,.34,.055]} radius={.018} smoothness={2}><meshStandardMaterial {...stone} color={col%2 ? "#81786b" : "#94897a"} roughness={.96} normalScale={new THREE.Vector2(.45,.45)} /></RoundedBox>
+    </mesh>))}
     <mesh position={[0, .72, .4]}><boxGeometry args={[1.48, 1.25, .18]} /><meshStandardMaterial color="#170b07" roughness={1} /></mesh>
     {[-.56,-.28,0,.28,.56].map((x,i) => <mesh key={x} position={[x,.28 + (i%2)*.12,.505]}><boxGeometry args={[.245,.1,.04]} /><meshStandardMaterial color="#593022" roughness={.9} /></mesh>)}
     {[-.92,.92].map(x => <mesh key={x} position={[x, .86, .44]} castShadow><boxGeometry args={[.24, 1.85, .38]} /><meshStandardMaterial {...stone} color="#756a5c" roughness={.9} normalScale={new THREE.Vector2(.35,.35)} /></mesh>)}
     {Array.from({length:9},(_,i)=>{const a=Math.PI*(i/8);return <mesh key={i} position={[Math.cos(a)*.72,1.2+Math.sin(a)*.55,.5]} rotation={[0,0,a-Math.PI/2]} castShadow><boxGeometry args={[.28,.17,.22]} /><meshStandardMaterial {...stone} color="#8c8070" roughness={.92} /></mesh>})}
     <mesh position={[0, 1.98, .03]} castShadow><boxGeometry args={[2.65, .24, .96]} /><meshStandardMaterial {...wood} color="#5c3928" roughness={.7} /></mesh>
+    <mesh position={[0,2.13,.08]} castShadow><boxGeometry args={[2.9,.09,1.02]} /><meshStandardMaterial {...wood} color="#744a31" roughness={.58} /></mesh>
+    <mesh position={[0,2.2,.1]} castShadow><boxGeometry args={[2.6,.06,.95]} /><meshStandardMaterial color="#a07b4d" metalness={.06} roughness={.55} /></mesh>
     <mesh position={[0, -.03, .3]} castShadow><boxGeometry args={[2.65, .18, 1.18]} /><meshStandardMaterial {...stone} color="#655d52" roughness={.95} /></mesh>
     {[-.72,.68].map((x,i)=><group key={x} position={[x,2.28,.12]}>
       <mesh><cylinderGeometry args={[.045,.055,.48,14]} /><meshStandardMaterial color="#d7c9aa" roughness={.72} /></mesh>
@@ -243,42 +339,40 @@ function Fireplace({ dark }: { dark: boolean }) {
       <mesh position={[0,-.28,0]}><cylinderGeometry args={[.12,.18,.08,18]} /><meshStandardMaterial color="#8b6a3e" metalness={.6} roughness={.3} /></mesh>
     </group>)}
     <FireSheet />
+    <group position={[0,.33,.62]}>
+      <mesh position={[0,-.05,-.04]} rotation={[-Math.PI/2,0,0]}><cylinderGeometry args={[.46,.52,.06,24]} /><meshStandardMaterial color="#201713" roughness={1} /></mesh>
+      {Array.from({length:13},(_,i)=>{const a=i*2.399;const radius=.08+.032*i;return <mesh key={i} position={[Math.cos(a)*radius,.02+(i%3)*.025,Math.sin(a)*radius]}><dodecahedronGeometry args={[.045+(i%3)*.012,0]} /><meshStandardMaterial color={i%3===0?"#d75b28":"#6d2618"} emissive={i%3===0?"#e45b22":"#2e0c07"} emissiveIntensity={dark?2.8:.8} roughness={.9} /></mesh>})}
+    </group>
     <group ref={flames} scale={[.65,.55,.65]}>
       {[[-.28, .49], [0, .46], [.28, .51]].map(([x, y], i) => <Float key={i} speed={2 + i} floatIntensity={.055}>
         <mesh position={[x, y, .54]} rotation={[0, 0, i === 1 ? 0 : .13 * (i ? -1 : 1)]}><coneGeometry args={[.17 + i * .018, .5 + i * .07, 18]} /><meshBasicMaterial color={i === 1 ? "#ffd989" : "#e86d33"} transparent opacity={.82} blending={THREE.AdditiveBlending} /></mesh>
       </Float>)}
     </group>
     {[-.28,.26].map((x,i)=><mesh key={x} position={[x,.27,.57]} rotation={[Math.PI/2,0,i ? -.28 : .3]}><cylinderGeometry args={[.075,.1,.72,9]} /><meshStandardMaterial color="#3b1c12" roughness={1} /></mesh>)}
+    <group position={[0,.52,.66]}>
+      {[-.42,-.14,.14,.42].map(x=><mesh key={x} position={[x,0,0]} rotation={[0,0,.07*x]}><boxGeometry args={[.025,.66,.035]} /><meshStandardMaterial color="#25211f" metalness={.78} roughness={.34} /></mesh>)}
+      {[-.25,.25].map(y=><mesh key={y} position={[0,y,0]}><boxGeometry args={[1.05,.025,.035]} /><meshStandardMaterial color="#25211f" metalness={.78} roughness={.34} /></mesh>)}
+      <mesh position={[-.56,-.39,0]} rotation={[0,0,.22]}><boxGeometry args={[.05,.25,.05]} /><meshStandardMaterial color="#211d1b" metalness={.75} /></mesh>
+      <mesh position={[.56,-.39,0]} rotation={[0,0,-.22]}><boxGeometry args={[.05,.25,.05]} /><meshStandardMaterial color="#211d1b" metalness={.75} /></mesh>
+    </group>
     <pointLight ref={light} position={[0, .9, 1.3]} color="#ff8b45" distance={8.5} decay={2} castShadow={false} />
   </group>;
 }
 
 function ReadingCorner({ dark }: { dark: boolean }) {
-  const leather = useLeatherSet();
   return <group position={[4.7, 0, 2.2]}>
-    <RoundedBox args={[1.65, 1.25, 1.45]} radius={.26} smoothness={4} position={[0, .72, 0]} castShadow><meshStandardMaterial {...leather} color="#552923" roughness={.72} normalScale={new THREE.Vector2(.45,.45)} /></RoundedBox>
-    <RoundedBox args={[1.4, 1.55, .38]} radius={.25} smoothness={4} position={[0, 1.55, -.45]} rotation={[-.16, 0, 0]} castShadow><meshStandardMaterial {...leather} color="#6a312b" roughness={.7} normalScale={new THREE.Vector2(.48,.48)} /></RoundedBox>
-    <RoundedBox args={[1.18, .26, 1.12]} radius={.12} smoothness={3} position={[0, 1.02, .14]} castShadow><meshStandardMaterial {...leather} color="#713a33" roughness={.7} /></RoundedBox>
-    <RoundedBox args={[.62, .55, .16]} radius={.12} smoothness={3} position={[.1, 1.55, -.22]} rotation={[-.15,0,.04]}><meshStandardMaterial {...leather} color="#8b5648" roughness={.8} /></RoundedBox>
-    {[-.66, .66].map((x) => <RoundedBox key={x} args={[.34, .68, 1.25]} radius={.16} smoothness={3} position={[x, 1.08, .03]} castShadow><meshStandardMaterial {...leather} color="#4f2723" roughness={.74} /></RoundedBox>)}
-    {[-.52,.52].map(x => <mesh key={x} position={[x,.04,-.34]}><cylinderGeometry args={[.045,.06,.54,10]} /><meshStandardMaterial color="#47291f" roughness={.7} /></mesh>)}
-    <mesh position={[1.55, .58, .1]} castShadow><cylinderGeometry args={[.58, .52, .1, 24]} /><meshStandardMaterial color="#4a2a1c" /></mesh>
-    <mesh position={[1.55, .95, .1]}><cylinderGeometry args={[.06, .06, .8, 12]} /><meshStandardMaterial color="#8f7046" metalness={.55} roughness={.3} /></mesh>
-    <group position={[1.55, 1.36, .1]} rotation={[0, 0, -.12]}>
-      <mesh castShadow><boxGeometry args={[.72, .04, .48]} /><meshStandardMaterial color="#d8c79e" /></mesh>
-      <mesh position={[0,.026,.02]}><boxGeometry args={[.64,.008,.42]} /><meshStandardMaterial color="#e9dfc7" /></mesh>
-      <mesh position={[0,.032,.02]} rotation={[0,.08,0]}><boxGeometry args={[.012,.012,.4]} /><meshBasicMaterial color="#9c7651" /></mesh>
+    <DetailedModel src="/models/ArmChair_01/model.gltf" position={[-.25,-.48,-.15]} rotation={[0,-.18,0]} scale={1.65} />
+    <DetailedModel src="/models/gothic_coffee_table/model.gltf" position={[1.45,-.5,.12]} rotation={[0,-.18,0]} scale={.58} />
+    <DetailedModel src="/models/vintage_oil_lamp/model.gltf" position={[1.44,.02,.08]} scale={.92} />
+    <pointLight position={[1.44,1.03,.5]} color="#ffd18a" intensity={dark ? 7.2 : 1.55} distance={6.8} decay={2} castShadow={false} />
+    <mesh position={[1.44,1.02,.08]}><sphereGeometry args={[.055,16,12]} /><meshBasicMaterial color="#fff0bd" /></mesh>
+    <group position={[1.18, .38, .06]} rotation={[0, -.2, -.08]}>
+      <mesh position={[-.19,0,0]} rotation={[0,.18,.04]} castShadow><boxGeometry args={[.4, .035, .52]} /><meshStandardMaterial color="#e3d5b4" roughness={.92} /></mesh>
+      <mesh position={[.19,0,0]} rotation={[0,-.18,-.04]} castShadow><boxGeometry args={[.4, .035, .52]} /><meshStandardMaterial color="#e3d5b4" roughness={.92} /></mesh>
+      <mesh position={[0,.025,0]}><boxGeometry args={[.025,.02,.5]} /><meshStandardMaterial color="#8d6040" roughness={.65} /></mesh>
+      {[-.13,.13].map(x=>Array.from({length:5},(_,i)=><mesh key={`${x}-${i}`} position={[x,.022,-.16+i*.07]}><boxGeometry args={[.19,.004,.008]} /><meshBasicMaterial color="#8a7660" transparent opacity={.5} /></mesh>))}
     </group>
-    <group position={[-1.35, 0, -.1]}>
-      <mesh position={[0, 1.45, 0]}><cylinderGeometry args={[.07, .08, 2.9, 12]} /><meshStandardMaterial color="#81683f" metalness={.55} /></mesh>
-      <mesh position={[.19, 2.7, 0]} rotation={[0, 0, -.24]}><coneGeometry args={[.43, .58, 32, 1, true]} /><meshStandardMaterial color="#c9a86e" side={THREE.DoubleSide} roughness={.55} emissive="#7b572c" emissiveIntensity={dark ? .35 : .08} /></mesh>
-      <mesh position={[-.03,.12,0]}><cylinderGeometry args={[.32,.42,.11,24]} /><meshStandardMaterial color="#80653d" metalness={.5} roughness={.35} /></mesh>
-      <pointLight position={[.25, 2.38, .55]} color="#ffd994" intensity={dark ? 6.2 : 1.2} distance={6.5} decay={2} />
-    </group>
-    <group position={[2.5, 0, -.6]}>
-      <mesh position={[0, .62, 0]}><cylinderGeometry args={[.28, .38, .9, 8]} /><meshStandardMaterial color="#8b694c" /></mesh>
-      {[0, 1, 2, 3, 4].map((i) => <mesh key={i} position={[(i - 2) * .13, 1.15 + (i % 2) * .16, 0]} rotation={[0, 0, (i - 2) * .18]}><sphereGeometry args={[.42, 10, 8]} /><meshStandardMaterial color="#3f6748" roughness={.9} /></mesh>)}
-    </group>
+    <DetailedModel src="/models/potted_plant_04/model.gltf" position={[2.5,-.5,-.6]} rotation={[0,.3,0]} scale={3.25} />
   </group>;
 }
 
@@ -358,9 +452,12 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
     <pointLight position={[0,5.4,2.5]} intensity={dark ? .65 : .3} color="#e3bd7b" distance={9} decay={2} />
     <CameraRig selectedId={selectedId} focus={focus} />
     <FilmicTone dark={dark} />
-    <mesh position={[0, -.57, 1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+    <mesh position={[0, -.61, 1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
       <planeGeometry args={[19, 16]} /><meshStandardMaterial {...floor} color={dark ? "#5a3827" : "#8a6145"} roughness={.78} normalScale={new THREE.Vector2(.32,.32)} />
     </mesh>
+    {Array.from({length:22},(_,i)=><RoundedBox key={`floor-plank-${i}`} args={[.84,.055,15.9]} radius={.012} smoothness={2} position={[-8.82+i*.84,-.575,1]} receiveShadow>
+      <meshStandardMaterial {...floor} color={dark ? (i%4===0?"#543222":"#62402d") : (i%4===0?"#80563e":"#95694b")} roughness={.72+(i%3)*.025} normalScale={new THREE.Vector2(.34,.34)} />
+    </RoundedBox>)}
     <Architecture dark={dark} />
     <Rug />
     <FloatingCandles dark={dark} />
@@ -397,3 +494,8 @@ export default function LibraryRoom(props: Props) {
     </div>
   </div>;
 }
+
+useGLTF.preload("/models/ArmChair_01/model.gltf");
+useGLTF.preload("/models/gothic_coffee_table/model.gltf");
+useGLTF.preload("/models/vintage_oil_lamp/model.gltf");
+useGLTF.preload("/models/potted_plant_04/model.gltf");
