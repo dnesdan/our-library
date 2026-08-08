@@ -24,3 +24,7 @@ npm run build
 ```
 
 The project uses vinext and is configured for Sites hosting through `.openai/hosting.json`.
+
+## Materials
+
+The 3D room uses CC0 PBR materials from Poly Haven: `dark_wood`, `stone_wall_05`, `wood_floor_worn`, and `leather_red_02`.
