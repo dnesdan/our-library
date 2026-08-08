@@ -27,4 +27,4 @@ The project uses vinext and is configured for Sites hosting through `.openai/hos
 
 ## Materials
 
-The 3D room uses CC0 PBR materials from Poly Haven: `dark_wood`, `stone_wall_05`, `wood_floor_worn`, and `leather_red_02`. Detailed CC0 glTF props are also from Poly Haven: `ArmChair_01`, `gothic_coffee_table`, `vintage_oil_lamp`, and `potted_plant_04`.
+The 3D room uses CC0 PBR materials from Poly Haven: `dark_wood`, `stone_wall_05`, `wood_floor_worn`, `leather_red_02`, and `quatrefoil_jacquard_fabric`. Detailed CC0 glTF props are also from Poly Haven: `ArmChair_01`, `gothic_coffee_table`, `vintage_oil_lamp`, `potted_plant_04`, and `vintage_grandfather_clock_01`.

@@ -35,7 +35,7 @@ function DetailedModel({ src, ...props }: { src: string } & Omit<React.Component
   return <group {...props}><primitive object={model} /></group>;
 }
 
-function usePBRSet(name: "dark-wood" | "stone" | "floor", repeat: [number, number]): PBRSet {
+function usePBRSet(name: "dark-wood" | "stone" | "floor" | "rug", repeat: [number, number]): PBRSet {
   const textures = useTexture([
     `/textures/${name}-color.jpg`,
     `/textures/${name}-normal.jpg`,
@@ -98,6 +98,19 @@ function useSpineTexture(book: Book) {
     ctx.strokeStyle = book.accent;
     ctx.lineWidth = 2;
     ctx.strokeRect(15, 62, 98, 388);
+    let seed = book.id * 9301 + 49297;
+    const random = () => ((seed = (seed * 233280 + 49297) % 233280) / 233280);
+    ctx.globalCompositeOperation = "multiply";
+    for (let i = 0; i < 34; i++) {
+      ctx.fillStyle = `rgba(44,24,15,${.025 + random() * .07})`;
+      const size = 1 + random() * 5;
+      ctx.fillRect(random() * 128, random() * 512, size, .5 + random() * 2);
+    }
+    const edgeWear = ctx.createLinearGradient(0,0,128,0);
+    edgeWear.addColorStop(0,"rgba(22,12,8,.42)"); edgeWear.addColorStop(.08,"transparent");
+    edgeWear.addColorStop(.92,"transparent"); edgeWear.addColorStop(1,"rgba(22,12,8,.35)");
+    ctx.fillStyle = edgeWear; ctx.fillRect(0,0,128,512);
+    ctx.globalCompositeOperation = "source-over";
     ctx.save();
     ctx.translate(64, 256);
     ctx.rotate(-Math.PI / 2);
@@ -125,9 +138,9 @@ function CameraRig({ selectedId, focus }: { selectedId: number | null; focus: "s
     const p = index >= 0 ? positionFor(index) : null;
     const mobile = size.width < 700;
     const mobileX = focus === "corner" ? 4.45 : -3.55;
-    const target = p ? new THREE.Vector3(p.x * .42, Math.max(2.05, p.y), 9.35) : new THREE.Vector3((mobile ? mobileX : .72) + pointer.x * .34, 2.95 + pointer.y * .12, mobile ? 14.7 : 14.15);
+    const target = p ? new THREE.Vector3(p.x * .42, Math.max(2.05, p.y), 9.35) : new THREE.Vector3((mobile ? mobileX : 1.8) + pointer.x * .34, 2.95 + pointer.y * .12, mobile ? 14.7 : 14.15);
     camera.position.lerp(target, 1 - Math.exp(-dt * 2.6));
-    const look = p ? new THREE.Vector3(p.x, p.y, .4) : new THREE.Vector3(mobile ? (focus === "corner" ? 4.35 : -3.55) : -.1, 2.3, .2);
+    const look = p ? new THREE.Vector3(p.x, p.y, .4) : new THREE.Vector3(mobile ? (focus === "corner" ? 4.35 : -3.55) : -.45, 2.3, .2);
     const current = new THREE.Vector3();
     camera.getWorldDirection(current);
     const aim = look.clone().sub(camera.position).normalize();
@@ -141,7 +154,7 @@ function FilmicTone({ dark }: { dark: boolean }) {
   const { gl } = useThree();
   useEffect(() => {
     gl.toneMapping = THREE.ACESFilmicToneMapping;
-    gl.toneMappingExposure = dark ? 1.16 : 1.08;
+    gl.toneMappingExposure = dark ? 1.32 : 1.08;
     gl.outputColorSpace = THREE.SRGBColorSpace;
   }, [dark, gl]);
   return null;
@@ -149,6 +162,7 @@ function FilmicTone({ dark }: { dark: boolean }) {
 
 function ShelfBay({ x }: { x: number }) {
   const wood = usePBRSet("dark-wood", [1.1, 2.5]);
+  const baySeed = Math.round((x + 6) * 10);
   const palette = ["#6e2f2b", "#344d4c", "#9b7040", "#253847", "#765447", "#4c3a55", "#b69a6a", "#863e32"];
   return <group position={[x, 0, 0]}>
     <RoundedBox args={[3.2, 6.4, .62]} radius={.08} smoothness={3} position={[0, 2.4, .25]} castShadow receiveShadow>
@@ -171,9 +185,11 @@ function ShelfBay({ x }: { x: number }) {
       <mesh position={[0,2.86,0]} rotation={[0,0,Math.PI]} castShadow><cylinderGeometry args={[.23,.16,.28,6]} /><meshStandardMaterial {...wood} color="#68412b" roughness={.6} /></mesh>
     </group>)}
     {rows.map((y, row) => Array.from({ length: 11 }, (_, slot) => {
+      if ((slot * 7 + row * 11 + baySeed) % 17 === 0 || (slot === 9 && (row + baySeed) % 3 === 0)) return null;
       const height = .78 + ((slot * 7 + row * 3) % 5) * .075;
       const width = .18 + ((slot * 5 + row) % 3) * .035;
-      return <group key={`${row}-${slot}`} position={[-1.22 + slot * .245, y + height / 2, .94]} rotation={[0, 0, ((slot + row) % 7 === 0 ? -.035 : 0)]}>
+      const lean = (slot + row + baySeed) % 9 === 0 ? -.075 : (slot * 2 + row + baySeed) % 13 === 0 ? .06 : 0;
+      return <group key={`${row}-${slot}`} position={[-1.22 + slot * .245, y + height / 2, .94 + ((slot+baySeed)%4)*.008]} rotation={[0, ((slot+row)%5-2)*.006, lean]}>
         <RoundedBox args={[width, height, .42]} radius={.015} smoothness={2} castShadow><meshStandardMaterial color={palette[(slot + row * 2) % palette.length]} roughness={.6} /></RoundedBox>
         <mesh position={[width*.51,0,0]}><boxGeometry args={[.012,height*.88,.36]} /><meshStandardMaterial color="#d4c5aa" roughness={.96} /></mesh>
         {Array.from({length:4},(_,page)=><mesh key={page} position={[width*.519,-height*.3+page*height*.19,.015]}><boxGeometry args={[.004,.006,.33]} /><meshBasicMaterial color="#8f8068" transparent opacity={.45} /></mesh>)}
@@ -181,6 +197,11 @@ function ShelfBay({ x }: { x: number }) {
         {(slot + row) % 4 === 0 && <mesh position={[0, -height * .2, .216]}><boxGeometry args={[width * .72, .012, .008]} /><meshBasicMaterial color="#d0b986" /></mesh>}
       </group>;
     }))}
+    {rows.map((y,row)=>(row+baySeed)%3===0 && <group key={`stack-${row}`} position={[.76,y+.055,1.02]} rotation={[0,.025,0]}>
+      {[0,.085,.165].map((sy,i)=><RoundedBox key={sy} args={[.72-i*.08,.07,.46]} radius={.012} smoothness={2} position={[0,sy,0]} rotation={[0,(i-1)*.035,(i-1)*.018]} castShadow>
+        <meshStandardMaterial color={palette[(row*3+i+baySeed)%palette.length]} roughness={.68} />
+      </RoundedBox>)}
+    </group>)}
     <mesh position={[0, 5.62, .83]} castShadow><boxGeometry args={[3.48, .22, .9]} /><meshStandardMaterial {...wood} color="#815033" roughness={.58} /></mesh>
     <mesh position={[0,5.77,.87]} castShadow><boxGeometry args={[3.68,.11,1.02]} /><meshStandardMaterial {...wood} color="#6a4029" roughness={.56} /></mesh>
     <mesh position={[0,-.28,.92]} castShadow><boxGeometry args={[3.42,.44,.88]} /><meshStandardMaterial {...wood} color="#5c3725" roughness={.62} /></mesh>
@@ -210,11 +231,13 @@ function RoomBook({ book, index, selected, match, profile, onSelect }: { book: B
   const p = positionFor(index);
   const height = .92 + (index % 5) * .07;
   const width = .34 + (index % 3) * .07;
+  const restingTilt = index % 11 === 0 ? -.055 : index % 13 === 0 ? .045 : 0;
   useFrame((_, dt) => {
     if (!ref.current) return;
     const tz = selected ? 1.45 : match ? 1.12 : .96;
     ref.current.position.z = THREE.MathUtils.damp(ref.current.position.z, tz, 6, dt);
     ref.current.rotation.y = THREE.MathUtils.damp(ref.current.rotation.y, selected ? -.11 : 0, 7, dt);
+    ref.current.rotation.z = THREE.MathUtils.damp(ref.current.rotation.z, selected ? 0 : restingTilt, 8, dt);
   });
   return <group ref={ref} position={[p.x, p.y + height / 2, .96]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
     <RoundedBox args={[width, height, .55]} radius={.022} smoothness={3} castShadow>
@@ -229,6 +252,7 @@ function RoomBook({ book, index, selected, match, profile, onSelect }: { book: B
     <mesh position={[0,height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
     <mesh position={[0,-height*.31,.288]}><boxGeometry args={[width*.82,.018,.012]} /><meshBasicMaterial color={book.accent} /></mesh>
     {[-.23,0,.23].map(rib=><mesh key={rib} position={[-width*.405,height*rib,.301]}><boxGeometry args={[width*.18,.035,.025]} /><meshStandardMaterial color={book.accent} metalness={.28} roughness={.38} /></mesh>)}
+    {[-.465,.465].map(edge=><mesh key={edge} position={[0,height*edge,.302]}><boxGeometry args={[width*.86,.015,.012]} /><meshStandardMaterial color="#b59056" metalness={.12} roughness={.55} /></mesh>)}
     {book.states[profile].status === "Reading" && <mesh position={[width * .28, height * .47, .33]}>
       <boxGeometry args={[.06, .2, .03]} /><meshBasicMaterial color={profile === "Dan" ? "#a96b4c" : "#c59a62"} />
     </mesh>}
@@ -377,13 +401,16 @@ function ReadingCorner({ dark }: { dark: boolean }) {
 }
 
 function Rug() {
+  const textile = usePBRSet("rug", [3.4, 2.1]);
   return <group position={[.45, -.545, 3.65]} rotation={[-Math.PI / 2, 0, 0]}>
-    <RoundedBox args={[7.6, 4.5, .035]} radius={.12} smoothness={2} receiveShadow><meshStandardMaterial color="#6f312d" roughness={1} /></RoundedBox>
-    <mesh position={[0,0,.022]}><planeGeometry args={[7.08,4.0]} /><meshStandardMaterial color="#a46c4a" roughness={1} /></mesh>
-    <mesh position={[0,0,.028]}><ringGeometry args={[1.25,1.32,8]} /><meshStandardMaterial color="#d0ad75" roughness={1} /></mesh>
-    <mesh position={[0,0,.03]} rotation={[0,0,Math.PI/4]}><ringGeometry args={[.56,.62,4]} /><meshStandardMaterial color="#452c2a" roughness={1} /></mesh>
-    {[-3.12,3.12].map(x => <mesh key={x} position={[x,0,.03]}><planeGeometry args={[.08,3.65]} /><meshBasicMaterial color="#d2b27b" /></mesh>)}
-    {[-1.7,1.7].map(y => <mesh key={y} position={[0,y,.03]}><planeGeometry args={[6.35,.08]} /><meshBasicMaterial color="#d2b27b" /></mesh>)}
+    <RoundedBox args={[7.6, 4.5, .055]} radius={.13} smoothness={3} receiveShadow><meshStandardMaterial {...textile} color="#7d3b38" roughness={.96} normalScale={new THREE.Vector2(.62,.62)} /></RoundedBox>
+    <mesh position={[0,0,.032]}><planeGeometry args={[7.1,4.02]} /><meshStandardMaterial {...textile} color="#9b5a4b" roughness={.95} normalScale={new THREE.Vector2(.58,.58)} /></mesh>
+    <mesh position={[0,0,.039]}><ringGeometry args={[1.25,1.34,8]} /><meshStandardMaterial color="#c29a66" roughness={.88} /></mesh>
+    <mesh position={[0,0,.041]} rotation={[0,0,Math.PI/4]}><ringGeometry args={[.56,.64,4]} /><meshStandardMaterial color="#4d2827" roughness={.92} /></mesh>
+    {[-3.12,3.12].map(x => <mesh key={x} position={[x,0,.041]}><planeGeometry args={[.075,3.65]} /><meshStandardMaterial color="#c9a06e" roughness={.9} /></mesh>)}
+    {[-1.7,1.7].map(y => <mesh key={y} position={[0,y,.041]}><planeGeometry args={[6.35,.075]} /><meshStandardMaterial color="#c9a06e" roughness={.9} /></mesh>)}
+    {Array.from({length:34},(_,i)=><mesh key={`fringe-a-${i}`} position={[-3.55+i*.215,-2.3,.01]} rotation={[0,0,(i%3-1)*.08]}><cylinderGeometry args={[.008,.012,.23,6]} /><meshStandardMaterial color="#bca37d" roughness={1} /></mesh>)}
+    {Array.from({length:34},(_,i)=><mesh key={`fringe-b-${i}`} position={[-3.55+i*.215,2.3,.01]} rotation={[0,0,(i%3-1)*.08]}><cylinderGeometry args={[.008,.012,.23,6]} /><meshStandardMaterial color="#bca37d" roughness={1} /></mesh>)}
   </group>;
 }
 
@@ -445,11 +472,12 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
   return <>
     <color attach="background" args={[dark ? "#120e0c" : "#b8aa91"]} />
     <fog attach="fog" args={[dark ? "#120e0c" : "#b8aa91", 9, 23]} />
-    <ambientLight intensity={dark ? .5 : .85} color={dark ? "#a57d63" : "#ffe9c9"} />
-    <hemisphereLight intensity={dark ? .38 : .75} color={dark ? "#60718f" : "#d9edf1"} groundColor={dark ? "#5a3020" : "#8d5c3c"} />
-    <directionalLight position={[7, 8, 7]} intensity={dark ? .72 : 2.25} color={dark ? "#8290ab" : "#fff0cf"} castShadow shadow-mapSize={[1536, 1536]} shadow-bias={-.0005} />
+    <ambientLight intensity={dark ? .68 : .85} color={dark ? "#aa8068" : "#ffe9c9"} />
+    <hemisphereLight intensity={dark ? .5 : .75} color={dark ? "#647694" : "#d9edf1"} groundColor={dark ? "#6a3723" : "#8d5c3c"} />
+    <directionalLight position={[7, 8, 7]} intensity={dark ? .9 : 2.25} color={dark ? "#8f9db8" : "#fff0cf"} castShadow shadow-mapSize={[2048, 2048]} shadow-bias={-.0005} />
     <spotLight position={[0, 7, 4]} angle={.62} penumbra={.85} intensity={q ? 1.5 : .55} color="#e9bd79" castShadow={false} />
     <pointLight position={[0,5.4,2.5]} intensity={dark ? .65 : .3} color="#e3bd7b" distance={9} decay={2} />
+    <rectAreaLight position={[0,3.8,5.2]} rotation={[0,Math.PI,0]} width={14} height={4.5} intensity={dark ? .62 : .82} color={dark ? "#d3a078" : "#ffe4bd"} />
     <CameraRig selectedId={selectedId} focus={focus} />
     <FilmicTone dark={dark} />
     <mesh position={[0, -.61, 1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
@@ -462,12 +490,13 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
     <Rug />
     <FloatingCandles dark={dark} />
     {bays.map(x => <ShelfBay key={x} x={x} />)}
-    {bays.map(x => <pointLight key={`shelf-light-${x}`} position={[x,5.45,2.15]} intensity={dark ? .32 : .08} color="#efb96f" distance={4.1} decay={2} />)}
+    {bays.map(x => <pointLight key={`shelf-light-${x}`} position={[x,5.45,2.15]} intensity={dark ? .48 : .08} color="#efb96f" distance={4.4} decay={2} />)}
     {books.map((book, index) => <RoomBook key={book.id} book={book} index={index} selected={selectedId === book.id} match={matches.has(book.id)} profile={profile} onSelect={() => onSelect(book.id)} />)}
     <mesh position={[0, 5.65, 1.45]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[.055, .055, 14.4, 16]} /><meshStandardMaterial color="#a9804b" metalness={.65} roughness={.25} /></mesh>
     <Ladder selectedId={selectedId} />
     <Fireplace dark={dark} />
     <ReadingCorner dark={dark} />
+    <DetailedModel src="/models/vintage_grandfather_clock_01/model.gltf" position={[7.18,-.52,.34]} rotation={[0,-.18,0]} scale={1.06} />
     <group position={[0,5.9,3.8]}>
       <mesh><cylinderGeometry args={[.035,.035,.8,12]} /><meshStandardMaterial color="#8f6d42" metalness={.65} roughness={.25} /></mesh>
       <mesh position={[0,-.46,0]}><torusGeometry args={[.46,.025,8,30]} /><meshStandardMaterial color="#9c7547" metalness={.7} roughness={.22} /></mesh>
@@ -484,7 +513,7 @@ function Scene({ books, theme, selectedId, search, profile, onSelect, focus }: P
 export default function LibraryRoom(props: Props) {
   const [focus, setFocus] = useState<"shelves" | "corner">("shelves");
   return <div className="room-canvas" aria-label="Interactive three-dimensional library room">
-    <Canvas shadows dpr={[1, 1.75]} camera={{ position: [.72, 2.95, 14.15], fov: 42 }} gl={{ antialias: true, powerPreference: "high-performance" }}>
+    <Canvas shadows dpr={[1, 1.75]} camera={{ position: [1.8, 2.95, 14.15], fov: 42 }} gl={{ antialias: true, powerPreference: "high-performance" }}>
       <Scene {...props} focus={focus} />
     </Canvas>
     <div className="room-plaque">D &amp; L <span>OUR LIBRARY</span></div>
@@ -499,3 +528,4 @@ useGLTF.preload("/models/ArmChair_01/model.gltf");
 useGLTF.preload("/models/gothic_coffee_table/model.gltf");
 useGLTF.preload("/models/vintage_oil_lamp/model.gltf");
 useGLTF.preload("/models/potted_plant_04/model.gltf");
+useGLTF.preload("/models/vintage_grandfather_clock_01/model.gltf");
